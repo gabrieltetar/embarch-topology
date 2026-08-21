@@ -1,0 +1,487 @@
+//! Auto-detection of `embarch-dev-bench`'s serial port — formerly
+//! `embarch-core`'s own `dev_bench.rs`, moved here unchanged in its VID/
+//! product/interface heuristic (design.md §3 decisions 2, 4).
+//!
+//! **The one real behavior change in the move: no env var overrides.**
+//! `EMBARCH_DEV_BENCH_PORT`/`_PRODUCT`/`_SERIAL`/`_INTERFACE` are gone
+//! outright (design.md §3 decision 9, retired-but-still-load-bearing) — they
+//! were exactly the mechanism that caused the incident this crate exists to
+//! prevent (design.md §1). What's left of `EMBARCH_DEV_BENCH_SERIAL`'s old
+//! job — disambiguating dev-bench from some other SEGGER-VID device on the
+//! same bench — is now covered *only* by [`enrollment`](super::enrollment)'s
+//! dev-bench-role fallback, which was already the stronger of the two
+//! signals (a live hardware-ID readback at enrollment time, not an
+//! operator-typed string) even back when the env var still existed as a
+//! second, parallel way to say the same thing.
+//!
+//! No hardware is opened here — this only reads USB descriptors already
+//! enumerated by the OS. Actually opening the port and running a link's own
+//! handshake is each consumer's job (`embarch-core`'s `study.rs`, e.g.); this
+//! module just answers "which port is it?".
+
+use anyhow::{bail, Context, Result};
+use serde::Serialize;
+use serialport::{SerialPortInfo, SerialPortType};
+
+use super::enrollment;
+
+/// SEGGER's USB vendor ID — every on-board J-Link (and every standalone one)
+/// enumerates its VCOM interfaces under this VID.
+pub const SEGGER_VID: u16 = 0x1366;
+
+/// Espressif Systems' USB vendor ID. **Not a [`select`] link candidate** —
+/// the ESP32-C5's native USB-Serial/JTAG peripheral turned out to be a bad
+/// fit for dev-bench's runtime link (a core-only reset that doesn't
+/// re-sample boot-strapping pins; a hardware reset that wedges the host USB
+/// CDC driver outright; a DTR/RTS-on-open gotcha reproducing the same wedge
+/// on demand — all real, documented Espressif/`probe-rs` silicon quirks, not
+/// bugs here). Kept defined because JTAG flashing/reset still use this exact
+/// port through the hardware crate's own probe enumeration — a wholly
+/// separate code path from this module's serial-port detection.
+pub const ESPRESSIF_VID: u16 = 0x303A;
+
+/// Silicon Labs' USB vendor ID — the CP210x-family USB-to-UART bridge chip
+/// on dev-bench's second, dedicated UART USB-C port. Unlike the other two
+/// VIDs here, this chip has no JTAG/debug capability at all, so its own
+/// serial can never be an enrollment candidate — see [`Filter::resolve`]'s
+/// doc comment on why the dev-bench-role fallback is scoped away from
+/// narrowing this VID's candidates.
+pub const SILABS_VID: u16 = 0x10C4;
+
+/// Default product-string needle, in `normalize`d form. Matches both
+/// Linux's bare `J-Link` and Windows' `JLink CDC UART Port` friendly name.
+pub const DEFAULT_PRODUCT_NEEDLE: &str = "jlink";
+
+/// The enrollment `role` treated as "this entry is dev-bench" for
+/// [`Filter::resolve`]'s fallback.
+pub const DEV_BENCH_ROLE: &str = "dev-bench";
+
+/// One detected port, plus whatever USB identity the OS reported for it.
+#[derive(Debug, Clone, Serialize)]
+pub struct DevBenchPort {
+    pub port_name: String,
+    /// `"segger-vid-match"`, `"espressif-vid-match"`, or `"silabs-vid-match"`
+    /// — which rule produced this. No `"env-override"` variant any more
+    /// (see this module's own top doc comment).
+    pub detected_by: &'static str,
+    pub vendor_id: Option<u16>,
+    pub product_id: Option<u16>,
+    pub serial_number: Option<String>,
+    pub product: Option<String>,
+    pub interface: Option<u8>,
+}
+
+fn detected_by_for_vid(vid: u16) -> &'static str {
+    match vid {
+        SEGGER_VID => "segger-vid-match",
+        ESPRESSIF_VID => "espressif-vid-match",
+        SILABS_VID => "silabs-vid-match",
+        _ => "vid-match", // unreachable given how candidates are filtered
+    }
+}
+
+/// No port matched. Distinct from every other detection failure so callers
+/// can treat "dev-bench isn't plugged in" (a normal, expected state)
+/// differently from "the heuristic is ambiguous" (a real configuration
+/// problem) — `embarch-core`'s `api.rs` maps this one to `404`.
+#[derive(Debug)]
+pub struct NotFound {
+    pub candidate_vid_ports_seen: usize,
+    pub total_ports_seen: usize,
+}
+
+impl std::fmt::Display for NotFound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "no embarch-dev-bench serial port found ({} serial port(s) visible, {} with a recognized link VID ({SEGGER_VID:#06x} SEGGER / {SILABS_VID:#06x} Silicon Labs — {ESPRESSIF_VID:#06x} Espressif's native USB-Serial/JTAG is JTAG-only, see that constant's own doc comment))",
+            self.total_ports_seen, self.candidate_vid_ports_seen
+        )?;
+        if self.candidate_vid_ports_seen > 0 {
+            write!(
+                f,
+                " — a matching probe/board is attached but enrollment's dev-bench-role fallback \
+                 excluded it; re-enroll dev-bench (`embarch-topology enroll --role dev-bench`) \
+                 with only its own probe attached"
+            )?;
+        } else {
+            write!(
+                f,
+                " — check dev-bench's USB connection (and `usbipd attach`, if Core and the board \
+                 are on different hosts)"
+            )?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for NotFound {}
+
+/// The narrowing rules applied on top of the VID match. No env vars feed
+/// this any more — the only source for `serial`/`serial_is_fallback` is
+/// [`Filter::resolve`]'s enrollment lookup.
+#[derive(Debug, Default, Clone)]
+pub struct Filter {
+    pub serial: Option<String>,
+    pub product_needle: Option<String>,
+    pub product_needle_is_default: bool,
+    /// Always `true` now that `EMBARCH_DEV_BENCH_SERIAL` is gone — kept as a
+    /// field (rather than deleted outright) because [`select`]'s own
+    /// asymmetric-fallback logic still depends on the distinction being
+    /// *nameable*, even though there's only one source for it left. See its
+    /// own doc comment for why a fallback-sourced serial is applied more
+    /// cautiously than an explicit one used to be.
+    pub serial_is_fallback: bool,
+    pub interface: Option<u8>,
+}
+
+impl Filter {
+    /// Always `DEFAULT_PRODUCT_NEEDLE`, with `known_boards`'s successor
+    /// (`super::enrollment::find_by_role`) as the only serial source, via the
+    /// `DEV_BENCH_ROLE` enrollment (`DEV_BENCH_ROLE`'s own doc comment has
+    /// the gap this closes: once a JTAG-capable DUT is attached alongside
+    /// dev-bench, VID+product string alone can't tell them apart, but the
+    /// exact serial recorded at enrollment can).
+    ///
+    /// The enrollment lookup itself failing (an unreadable/corrupt file)
+    /// degrades to no serial fallback at all, plus a logged warning, rather
+    /// than breaking detection entirely over what's meant to be a
+    /// convenience default, not a hard requirement.
+    pub fn resolve() -> Result<Self> {
+        let serial = match enrollment::find_by_role(DEV_BENCH_ROLE) {
+            Ok(Some(board)) => Some(board.probe_serial),
+            Ok(None) => None,
+            Err(e) => {
+                tracing::warn!(
+                    "failed to read enrollment while resolving dev-bench's serial fallback, \
+                     continuing without it: {e:?}"
+                );
+                None
+            }
+        };
+
+        Ok(Self {
+            serial,
+            product_needle: Some(DEFAULT_PRODUCT_NEEDLE.to_string()),
+            product_needle_is_default: true,
+            serial_is_fallback: true,
+            interface: None,
+        })
+    }
+}
+
+/// Lowercase, alphanumerics only — lets one default needle cover every
+/// spelling of the same probe across platforms.
+fn normalize(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
+fn as_candidate(info: &SerialPortInfo) -> Option<DevBenchPort> {
+    let SerialPortType::UsbPort(usb) = &info.port_type else {
+        return None;
+    };
+
+    Some(DevBenchPort {
+        port_name: info.port_name.clone(),
+        detected_by: detected_by_for_vid(usb.vid),
+        vendor_id: Some(usb.vid),
+        product_id: Some(usb.pid),
+        serial_number: usb.serial_number.clone(),
+        product: usb.product.clone(),
+        interface: usb.interface,
+    })
+}
+
+/// Applies the VID + serial/product/interface rules to an already-enumerated
+/// port list. Split out from [`detect`] so the whole heuristic is
+/// unit-testable with no hardware involved.
+pub fn select(ports: &[SerialPortInfo], filter: &Filter) -> Result<DevBenchPort> {
+    let mut candidates: Vec<DevBenchPort> = ports
+        .iter()
+        .filter_map(as_candidate)
+        .filter(|c| matches!(c.vendor_id, Some(SEGGER_VID) | Some(SILABS_VID)))
+        .collect();
+    let candidate_vid_ports_seen = candidates.len();
+
+    if let Some(serial) = &filter.serial {
+        let want = normalize(serial);
+        let narrowed: Vec<DevBenchPort> = candidates
+            .iter()
+            .filter(|c| c.serial_number.as_deref().map(normalize) == Some(want.clone()))
+            .cloned()
+            .collect();
+
+        if filter.serial_is_fallback {
+            // A fallback-sourced serial is a JTAG probe's serial, only
+            // guaranteed to equal a link candidate's own serial when the
+            // link and the debug probe are the same physical USB device —
+            // not true once dev-bench's link moved to a separate USB-UART
+            // bridge chip (SILABS_VID). Apply it only when it actually
+            // matches something; a non-match leaves `candidates` untouched.
+            if !narrowed.is_empty() {
+                candidates = narrowed;
+            }
+        } else {
+            candidates = narrowed;
+        }
+    }
+    if let Some(needle) = &filter.product_needle {
+        candidates.retain(|c| {
+            (filter.product_needle_is_default && c.vendor_id != Some(SEGGER_VID))
+                || c.product
+                    .as_deref()
+                    .is_none_or(|p| normalize(p).contains(needle))
+        });
+    }
+    if let Some(interface) = filter.interface {
+        candidates.retain(|c| c.interface == Some(interface));
+    }
+
+    candidates.sort_by(|a, b| {
+        a.interface
+            .cmp(&b.interface)
+            .then_with(|| a.port_name.cmp(&b.port_name))
+    });
+
+    if candidates.len() > 1 {
+        let one_probe = candidates.iter().all(|c| {
+            c.vendor_id == candidates[0].vendor_id && c.serial_number == candidates[0].serial_number
+        });
+        let interfaces_known = candidates.iter().all(|c| c.interface.is_some());
+
+        if !(one_probe && interfaces_known) {
+            bail!(
+                "ambiguous embarch-dev-bench detection — {} candidate ports match:\n{}\nenroll \
+                 the intended board's serial via `embarch-topology enroll --role dev-bench`, or \
+                 physically disconnect the other candidate",
+                candidates.len(),
+                describe(&candidates)
+            );
+        }
+
+        tracing::warn!(
+            "{} VCOM interfaces on one J-Link ({:?}) match; using the lowest interface index ({}).\n{}",
+            candidates.len(),
+            candidates[0].serial_number,
+            candidates[0].port_name,
+            describe(&candidates)
+        );
+    }
+
+    if candidates.is_empty() {
+        return Err(anyhow::Error::new(NotFound {
+            candidate_vid_ports_seen,
+            total_ports_seen: ports.len(),
+        }));
+    }
+
+    Ok(candidates.remove(0))
+}
+
+fn describe(candidates: &[DevBenchPort]) -> String {
+    candidates
+        .iter()
+        .map(|c| {
+            format!(
+                "  {} (pid {:#06x}, serial {:?}, product {:?}, interface {:?})",
+                c.port_name,
+                c.product_id.unwrap_or(0),
+                c.serial_number,
+                c.product,
+                c.interface
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Finds dev-bench's port on this machine, live, on every call — no env var
+/// short-circuits this any more (design.md §3 decisions 3, 9).
+///
+/// Blocking (`serialport::available_ports` is synchronous, and so is the
+/// enrollment file read `Filter::resolve` does) — callers on an async
+/// runtime should run this via `spawn_blocking`, same as `embarch-core`
+/// already does for every other hardware-touching call.
+pub fn detect() -> Result<DevBenchPort> {
+    let filter = Filter::resolve()?;
+    let ports = serialport::available_ports().context("failed to enumerate serial ports")?;
+    select(&ports, &filter)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serialport::UsbPortInfo;
+
+    fn usb(
+        port_name: &str,
+        vid: u16,
+        product: Option<&str>,
+        serial: Option<&str>,
+        interface: Option<u8>,
+    ) -> SerialPortInfo {
+        SerialPortInfo {
+            port_name: port_name.to_string(),
+            port_type: SerialPortType::UsbPort(UsbPortInfo {
+                vid,
+                pid: 0x0105,
+                serial_number: serial.map(str::to_string),
+                manufacturer: Some("SEGGER".to_string()),
+                product: product.map(str::to_string),
+                interface,
+            }),
+        }
+    }
+
+    fn default_filter() -> Filter {
+        Filter {
+            serial: None,
+            product_needle: Some(DEFAULT_PRODUCT_NEEDLE.to_string()),
+            product_needle_is_default: true,
+            serial_is_fallback: true,
+            interface: None,
+        }
+    }
+
+    #[test]
+    fn picks_the_only_segger_port_among_noise() {
+        let ports = vec![
+            SerialPortInfo {
+                port_name: "/dev/ttyS0".to_string(),
+                port_type: SerialPortType::Unknown,
+            },
+            usb("/dev/ttyACM0", 0x0483, Some("STM32 STLink"), None, Some(2)),
+            usb(
+                "/dev/ttyACM1",
+                SEGGER_VID,
+                Some("J-Link"),
+                Some("760001"),
+                Some(0),
+            ),
+        ];
+
+        let found = select(&ports, &default_filter()).unwrap();
+        assert_eq!(found.port_name, "/dev/ttyACM1");
+        assert_eq!(found.detected_by, "segger-vid-match");
+    }
+
+    #[test]
+    fn windows_friendly_name_matches_the_same_default_needle() {
+        let ports = vec![usb(
+            "COM4",
+            SEGGER_VID,
+            Some("JLink CDC UART Port"),
+            Some("760001"),
+            Some(0),
+        )];
+        assert_eq!(select(&ports, &default_filter()).unwrap().port_name, "COM4");
+    }
+
+    #[test]
+    fn a_port_reporting_no_product_string_is_not_excluded() {
+        let ports = vec![usb("/dev/ttyACM0", SEGGER_VID, None, Some("760001"), Some(0))];
+        assert_eq!(
+            select(&ports, &default_filter()).unwrap().port_name,
+            "/dev/ttyACM0"
+        );
+    }
+
+    #[test]
+    fn absence_is_reported_as_not_found() {
+        let ports = vec![usb("/dev/ttyACM0", 0x0483, Some("STM32 STLink"), None, Some(2))];
+        let err = select(&ports, &default_filter()).unwrap_err();
+        let not_found = err.downcast_ref::<NotFound>().expect("NotFound");
+        assert_eq!(not_found.candidate_vid_ports_seen, 0);
+        assert_eq!(not_found.total_ports_seen, 1);
+    }
+
+    #[test]
+    fn serial_number_disambiguates_two_probes_via_fallback() {
+        let ports = vec![
+            usb("/dev/ttyACM0", SEGGER_VID, Some("J-Link"), Some("760001"), Some(0)),
+            usb("/dev/ttyACM1", SEGGER_VID, Some("J-Link"), Some("760002"), Some(0)),
+        ];
+
+        let err = select(&ports, &default_filter()).unwrap_err();
+        assert!(err.downcast_ref::<NotFound>().is_none());
+        assert!(format!("{err}").contains("ambiguous"));
+
+        let filter = Filter {
+            serial: Some("760002".to_string()),
+            ..default_filter()
+        };
+        assert_eq!(select(&ports, &filter).unwrap().port_name, "/dev/ttyACM1");
+    }
+
+    #[test]
+    fn two_vcoms_on_one_probe_resolve_to_the_lowest_interface() {
+        let ports = vec![
+            usb("/dev/ttyACM1", SEGGER_VID, Some("J-Link"), Some("760001"), Some(2)),
+            usb("/dev/ttyACM0", SEGGER_VID, Some("J-Link"), Some("760001"), Some(0)),
+        ];
+        assert_eq!(
+            select(&ports, &default_filter()).unwrap().port_name,
+            "/dev/ttyACM0"
+        );
+    }
+
+    #[test]
+    fn an_espressif_vid_only_port_is_not_a_link_candidate() {
+        let ports = vec![usb("COM12", ESPRESSIF_VID, Some("USB Serial Device"), None, Some(0))];
+        let err = select(&ports, &default_filter()).unwrap_err();
+        assert_eq!(
+            err.downcast_ref::<NotFound>().expect("NotFound").candidate_vid_ports_seen,
+            0
+        );
+    }
+
+    #[test]
+    fn a_segger_probe_and_a_silabs_bridge_together_are_ambiguous_with_no_fallback() {
+        let ports = vec![
+            usb("/dev/ttyACM0", SEGGER_VID, Some("J-Link"), None, Some(0)),
+            usb(
+                "/dev/ttyACM1",
+                SILABS_VID,
+                Some("Silicon Labs CP210x USB to UART Bridge"),
+                None,
+                Some(0),
+            ),
+        ];
+        let err = select(&ports, &default_filter()).unwrap_err();
+        assert!(format!("{err}").contains("ambiguous"));
+    }
+
+    #[test]
+    fn a_fallback_serial_mismatch_does_not_exclude_the_only_candidate() {
+        let ports = vec![usb(
+            "COM13",
+            SILABS_VID,
+            Some("Silicon Labs CP210x USB to UART Bridge"),
+            Some("D607104BD96EF0119D5C489B1045C30F"),
+            Some(0),
+        )];
+        let filter = Filter {
+            serial: Some("D0:CF:13:ED:F9:30".to_string()), // an enrolled JTAG probe's serial
+            serial_is_fallback: true,
+            ..default_filter()
+        };
+        assert_eq!(select(&ports, &filter).unwrap().port_name, "COM13");
+    }
+
+    #[test]
+    fn a_silabs_vid_port_is_picked_without_a_product_string_match() {
+        let ports = vec![usb(
+            "COM13",
+            SILABS_VID,
+            Some("Silicon Labs CP210x USB to UART Bridge"),
+            Some("D607104BD96EF0119D5C489B1045C30F"),
+            Some(0),
+        )];
+        let found = select(&ports, &default_filter()).unwrap();
+        assert_eq!(found.port_name, "COM13");
+        assert_eq!(found.detected_by, "silabs-vid-match");
+    }
+}

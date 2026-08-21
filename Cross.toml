@@ -1,0 +1,12 @@
+# Only `aarch64-unknown-linux-gnu` needs `cross` (a Docker-based build) at
+# all, same reasoning as `embarch-core`'s own `Cross.toml` (this repo's
+# `hardware`/`bin` features pull in the exact same `probe-rs`/`serialport`
+# dependencies): no free aarch64-linux GitHub runner exists, and it's the
+# only target where the cross-compilation also needs a C library
+# (`libudev`, via `nusb`/`serialport`'s `libudev-sys`).
+[target.aarch64-unknown-linux-gnu]
+pre-build = [
+    "dpkg --add-architecture arm64",
+    "apt-get update",
+    "apt-get install --assume-yes libudev-dev:arm64 pkg-config",
+]

@@ -1,0 +1,27 @@
+name: Test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      # probe-rs/serialport (behind `hardware`/`bin`) need libudev at build
+      # time on Linux — same as embarch-core's own CI needs.
+      - run: sudo apt-get update && sudo apt-get install -y libudev-dev
+
+      - name: cargo test (software topology only)
+        run: cargo test --locked
+      - name: cargo test (+ hardware)
+        run: cargo test --locked --features hardware
+      - name: cargo test (+ bin)
+        run: cargo test --locked --features bin
+
+      - name: clippy (bin, the widest feature set)
+        run: cargo clippy --locked --features bin --all-targets -- -D warnings

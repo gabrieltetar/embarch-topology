@@ -1,0 +1,88 @@
+[package]
+name = "embarch-topology"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "The EmbArch suite's shared software- and hardware-topology crate: resolve_software_topology()/resolve_dev_bench_port()/enrollment/validate(), linked live by embarch-core, embarch-api, and embarch-umbrella, plus a thin CLI/UI binary over the same functions. embarch-doc/embarch-topology/design.md is the source of truth."
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+# The `embarch-topology` binary (CLI + local web UI, design.md §3 decision 5)
+# is a `[[bin]]` target in this same package rather than a separate crate —
+# same shape as embarch-study-designer's `extract-gatt-config` tool
+# (design.md §5's cross-repo-dependency precedent this repo follows). Gated
+# behind the `bin` feature so a plain library consumer (embarch-core with
+# `features = ["hardware"]`, embarch-api/embarch-umbrella with no extra
+# features at all) never resolves or builds axum/clap.
+[[bin]]
+name = "embarch-topology"
+path = "bin/main.rs"
+required-features = ["bin"]
+
+[dependencies]
+anyhow = "1.0.103"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", optional = true }
+# Only `resolve_software_topology()` (src/software.rs) needs this — a tiny,
+# short-timeout loopback/LAN client for probing Core's `/status`. No
+# hardware-facing code in this crate ever needs an HTTP client.
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls"] }
+# `rt`/`macros`/`sync`/`time` cover `resolve_software_topology()`'s async fn
+# and (under `hardware`) the alert event stream's `broadcast` channel. The
+# heavier `rt-multi-thread`/`net`/`fs` the UI server needs are added only by
+# the `bin` feature below, so a plain lib consumer's tokio feature set stays
+# small (feature unification still means embarch-umbrella's own tokio build
+# picks these up too, but that's normal Cargo feature unification, not a new
+# hardware-shaped dependency — the thing embarch-umbrella's own Cargo.toml
+# comment actually guards against, see that repo's note by the same name).
+tokio = { version = "1.53.0", features = ["rt", "macros", "sync", "time"] }
+
+# ---- feature-gated: only pulled in under `hardware` (embarch-core) or `bin`
+# (this crate's own CLI/UI binary) — never by embarch-api/embarch-umbrella,
+# which stay hardware-free in their own dependency footprint by design
+# (embarch-umbrella/Cargo.toml's own "deliberately absent" comment; design.md
+# §5's public-API open question, resolved here: feature-gate the hardware
+# half rather than force it on every consumer).
+probe-rs = { version = "0.31", optional = true }
+serialport = { version = "4.9.0", features = ["usbportinfo-interface"], optional = true }
+serde = { version = "1.0.228", features = ["derive"], optional = true }
+toml = { version = "1.1", optional = true }
+# The alert log (`hardware::alert`) is JSON-lines, and the same alert type
+# is what a live push's tiny loopback POST body carries — both need this
+# under `hardware` already, not just under `bin`.
+serde_json = { version = "1.0.150", optional = true }
+
+# ---- feature-gated: only pulled in by this crate's own `bin` target.
+axum = { version = "0.8.9", optional = true }
+clap = { version = "4.6.2", features = ["derive"], optional = true }
+# The UI's `/events` SSE endpoint: `hardware::alert::push_live`'s loopback
+# POST lands in `bin/ui.rs`'s `broadcast` channel, and these two turn that
+# channel into the `Stream` axum's SSE response wants.
+futures-util = { version = "0.3.34", optional = true }
+tokio-stream = { version = "0.1", features = ["sync"], optional = true }
+
+[features]
+default = []
+# Hardware-topology detection/enrollment/validation (dev-bench port
+# detection, chip hardware-ID readback, enrollment storage, validate()) —
+# needs probe-rs/serialport, so it's opt-in. embarch-core is the one
+# consumer that enables it.
+hardware = ["dep:probe-rs", "dep:serialport", "dep:serde", "dep:toml", "dep:serde_json"]
+# This crate's own CLI/UI binary. Implies `hardware` (the whole point of the
+# binary is to run the identical validation/enrollment logic Core runs,
+# design.md §3 decision 8) plus the local web server and its JSON bodies.
+bin = [
+    "hardware",
+    "dep:axum",
+    "dep:clap",
+    "dep:futures-util",
+    "dep:tokio-stream",
+    "dep:tracing-subscriber",
+    "tokio/rt-multi-thread",
+    "tokio/net",
+    "tokio/fs",
+    "tokio/signal",
+]
+
+[dev-dependencies]
+tokio = { version = "1.53.0", features = ["rt-multi-thread", "macros"] }

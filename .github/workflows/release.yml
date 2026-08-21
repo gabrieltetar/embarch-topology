@@ -1,0 +1,85 @@
+# Release CI for the `embarch-topology` binary (CLI + local web UI,
+# design.md §3 decision 5) — mirrors embarch-core's own release.yml exactly
+# (same probe-rs/serialport dependency shape under `--features bin`, same
+# four targets), since this repo has no cross-repo path dependency of its
+# own to worry about (unlike embarch-core/embarch-api/embarch-umbrella's
+# release workflows, which now check out this repo as a sibling — see their
+# own release.yml comments).
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+env:
+  BIN: embarch-topology
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: true
+          - target: aarch64-apple-darwin
+            os: macos-14
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: Install libudev (native Linux build only)
+        if: matrix.os == 'ubuntu-latest' && !matrix.cross
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+
+      - name: Build (cross)
+        if: matrix.cross
+        run: cross build --release --features bin --target ${{ matrix.target }}
+
+      - name: Build (native)
+        if: ${{ !matrix.cross }}
+        run: cargo build --release --features bin --target ${{ matrix.target }}
+
+      - name: Package
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="${BIN}-${{ matrix.target }}"
+          bin="${BIN}"
+          if [[ "${{ matrix.target }}" == *windows* ]]; then bin="${BIN}.exe"; fi
+          mkdir -p "dist/${name}"
+          cp "target/${{ matrix.target }}/release/${bin}" "dist/${name}/"
+          cd dist
+          if [[ "${{ matrix.target }}" == *windows* ]]; then
+            7z a "${name}.zip" "${name}" >/dev/null
+            echo "asset=dist/${name}.zip" >> "$GITHUB_OUTPUT"
+          else
+            tar czf "${name}.tar.gz" "${name}"
+            echo "asset=dist/${name}.tar.gz" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.package.outputs.asset }}
+          fail_on_unmatched_files: true
