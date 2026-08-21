@@ -16,7 +16,7 @@ jobs:
       # time on Linux — same as embarch-core's own CI needs.
       - run: sudo apt-get update && sudo apt-get install -y libudev-dev
 
-      - name: cargo test (default: software topology only)
+      - name: "cargo test (default: software topology only)"
         run: cargo test --locked
       - name: cargo test (hardware only — embarch-core's real, no-default-features config)
         run: cargo test --locked --no-default-features --features hardware
