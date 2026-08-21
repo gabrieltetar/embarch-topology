@@ -16,12 +16,24 @@ jobs:
       # time on Linux — same as embarch-core's own CI needs.
       - run: sudo apt-get update && sudo apt-get install -y libudev-dev
 
-      - name: cargo test (software topology only)
+      - name: cargo test (default: software topology only)
         run: cargo test --locked
-      - name: cargo test (+ hardware)
+      - name: cargo test (hardware only — embarch-core's real, no-default-features config)
+        run: cargo test --locked --no-default-features --features hardware
+      - name: cargo test (+ hardware, default features still on)
         run: cargo test --locked --features hardware
       - name: cargo test (+ bin)
         run: cargo test --locked --features bin
 
       - name: clippy (bin, the widest feature set)
         run: cargo clippy --locked --features bin --all-targets -- -D warnings
+      - name: clippy (embarch-core's real config)
+        run: cargo clippy --locked --no-default-features --features hardware --all-targets -- -D warnings
+
+      - name: confirm embarch-core's real config never pulls in reqwest/rustls/aws-lc-sys
+        run: |
+          set -euo pipefail
+          if cargo tree --no-default-features --features hardware -e normal | grep -iE "reqwest|aws-lc|rustls"; then
+            echo "::error::a C-toolchain-needing or async-HTTP dependency leaked into the hardware-only, no-default-features build"
+            exit 1
+          fi

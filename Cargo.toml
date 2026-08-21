@@ -12,8 +12,8 @@ description = "The EmbArch suite's shared software- and hardware-topology crate:
 # same shape as embarch-study-designer's `extract-gatt-config` tool
 # (design.md §5's cross-repo-dependency precedent this repo follows). Gated
 # behind the `bin` feature so a plain library consumer (embarch-core with
-# `features = ["hardware"]`, embarch-api/embarch-umbrella with no extra
-# features at all) never resolves or builds axum/clap.
+# `default-features = false, features = ["hardware"]`, embarch-api/
+# embarch-umbrella with default features) never resolves or builds axum/clap.
 [[bin]]
 name = "embarch-topology"
 path = "bin/main.rs"
@@ -23,26 +23,31 @@ required-features = ["bin"]
 anyhow = "1.0.103"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", optional = true }
-# Only `resolve_software_topology()` (src/software.rs) needs this — a tiny,
-# short-timeout loopback/LAN client for probing Core's `/status`. No
-# hardware-facing code in this crate ever needs an HTTP client.
-reqwest = { version = "0.13.4", default-features = false, features = ["rustls"] }
-# `rt`/`macros`/`sync`/`time` cover `resolve_software_topology()`'s async fn
-# and (under `hardware`) the alert event stream's `broadcast` channel. The
-# heavier `rt-multi-thread`/`net`/`fs` the UI server needs are added only by
-# the `bin` feature below, so a plain lib consumer's tokio feature set stays
-# small (feature unification still means embarch-umbrella's own tokio build
-# picks these up too, but that's normal Cargo feature unification, not a new
-# hardware-shaped dependency — the thing embarch-umbrella's own Cargo.toml
-# comment actually guards against, see that repo's note by the same name).
-tokio = { version = "1.53.0", features = ["rt", "macros", "sync", "time"] }
 
-# ---- feature-gated: only pulled in under `hardware` (embarch-core) or `bin`
-# (this crate's own CLI/UI binary) — never by embarch-api/embarch-umbrella,
-# which stay hardware-free in their own dependency footprint by design
-# (embarch-umbrella/Cargo.toml's own "deliberately absent" comment; design.md
-# §5's public-API open question, resolved here: feature-gate the hardware
-# half rather than force it on every consumer).
+# ---- feature-gated under `software` (on by default: embarch-api/
+# embarch-umbrella both need it, embarch-core never calls into this module at
+# all — confirmed via grep, only `embarch_topology::hardware::*`). Split out
+# from `hardware` deliberately, found worth doing once `cargo tree` showed
+# `reqwest` pulls in `aws-lc-sys` (rustls's default crypto provider) even
+# under just `features = ["hardware"]`: a real C-toolchain-needing dependency
+# `embarch-core`'s own Windows build has no use for and shouldn't pay for
+# cross-compiling (`embarch-dev-workflow.md` §4's own MSVC-linker caveat is
+# exactly this class of risk). `embarch-core`'s Cargo.toml opts out with
+# `default-features = false, features = ["hardware"]`.
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls"], optional = true }
+# `rt`/`macros`/`sync`/`time` cover `resolve_software_topology()`'s async fn.
+# Nothing under `hardware` alone needs tokio at all (`alert.rs`'s loopback
+# push is a raw, sync `std::net::TcpStream`, deliberately — see that file's
+# own doc comment). The heavier `rt-multi-thread`/`net`/`fs`/`signal` the UI
+# server needs are added only by the `bin` feature below.
+tokio = { version = "1.53.0", features = ["rt", "macros", "sync", "time"], optional = true }
+
+# ---- feature-gated under `hardware` (embarch-core is the one consumer) or
+# `bin` (this crate's own CLI/UI binary) — never by embarch-api/
+# embarch-umbrella, which stay hardware-free in their own dependency
+# footprint by design (embarch-umbrella/Cargo.toml's own "deliberately
+# absent" comment; design.md §5's public-API open question, resolved here:
+# feature-gate the hardware half rather than force it on every consumer).
 probe-rs = { version = "0.31", optional = true }
 serialport = { version = "4.9.0", features = ["usbportinfo-interface"], optional = true }
 serde = { version = "1.0.228", features = ["derive"], optional = true }
@@ -62,17 +67,26 @@ futures-util = { version = "0.3.34", optional = true }
 tokio-stream = { version = "0.1", features = ["sync"], optional = true }
 
 [features]
-default = []
+# `software` on by default: the common case (embarch-api/embarch-umbrella)
+# needs it and neither wants `hardware`, so defaulting it on and having
+# embarch-core opt out (the one consumer that doesn't need it) is fewer
+# Cargo.toml edits across the suite than defaulting it off.
+default = ["software"]
+# Software-topology detection + Core-reachability probing
+# (`resolve_software_topology`) — needs `reqwest`/`tokio`.
+software = ["dep:reqwest", "dep:tokio"]
 # Hardware-topology detection/enrollment/validation (dev-bench port
 # detection, chip hardware-ID readback, enrollment storage, validate()) —
 # needs probe-rs/serialport, so it's opt-in. embarch-core is the one
 # consumer that enables it.
 hardware = ["dep:probe-rs", "dep:serialport", "dep:serde", "dep:toml", "dep:serde_json"]
-# This crate's own CLI/UI binary. Implies `hardware` (the whole point of the
-# binary is to run the identical validation/enrollment logic Core runs,
-# design.md §3 decision 8) plus the local web server and its JSON bodies.
+# This crate's own CLI/UI binary. Implies both halves (the whole point of
+# the binary is to run the identical validation/enrollment logic Core runs,
+# design.md §3 decision 8, plus report software topology like `doctor`
+# does) plus the local web server and its JSON bodies.
 bin = [
     "hardware",
+    "software",
     "dep:axum",
     "dep:clap",
     "dep:futures-util",

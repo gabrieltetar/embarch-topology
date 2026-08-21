@@ -15,16 +15,21 @@ Two things built from one codebase:
    `embarch-umbrella` all depend on as a plain path dependency and call
    live, in-process, at their own moment of need — no shell-out, no
    hand-off file, no env var.
-   - `software` (always available, no extra features): software-topology
-     detection (`local`/`wsl-host`/`remote`) and live Core-reachability
-     probing. `embarch-api`'s `base_url = "auto"` and `embarch-umbrella`'s
-     `doctor`/`setup` use this.
-   - `hardware` (feature-gated — `features = ["hardware"]`): dev-bench port
+   - `software` (**on by default**): software-topology detection
+     (`local`/`wsl-host`/`remote`) and live Core-reachability probing, via
+     `reqwest`/`tokio`. `embarch-api`'s `base_url = "auto"` and
+     `embarch-umbrella`'s `doctor`/`setup` use this.
+   - `hardware` (opt-in — `features = ["hardware"]`): dev-bench port
      detection, chip hardware-ID readback, enrollment storage, and live
      board-identity validation. `embarch-core` is the one consumer; enabling
      this pulls in `probe-rs`/`serialport`, which `embarch-api`/
      `embarch-umbrella` deliberately never do (matching
      `embarch-umbrella`'s own "no hardware knowledge" boundary).
+     `embarch-core` never calls into `software` either, so it opts out of
+     that with `default-features = false` — its own real dependency tree
+     (`cargo tree --no-default-features --features hardware`) carries
+     neither `reqwest` nor its transitive `aws-lc-sys` (a real C-toolchain
+     dependency, irrelevant to Core's own hardware-facing job).
 2. **A thin `embarch-topology` binary** (`bin/`, `features = ["bin"]`): a
    CLI plus a loopback-only local web UI, wrapping the exact same library
    functions, for a human to inspect or fix things directly.
@@ -35,8 +40,8 @@ As a path dependency from a sibling repo (the pattern `embarch-study-designer`
 already established for this suite):
 
 ```toml
-embarch-topology = { path = "../embarch-topology" }                       # software-topology only
-embarch-topology = { path = "../embarch-topology", features = ["hardware"] } # + hardware topology
+embarch-topology = { path = "../embarch-topology" }                                                    # software-topology only (default)
+embarch-topology = { path = "../embarch-topology", default-features = false, features = ["hardware"] } # hardware-topology only (embarch-core)
 ```
 
 ## Building the CLI/UI
@@ -50,8 +55,9 @@ cargo run --features bin -- ui
 ## Testing
 
 ```sh
-cargo test                    # software-topology logic only
-cargo test --features hardware
+cargo test                                             # software-topology logic only (default)
+cargo test --no-default-features --features hardware   # embarch-core's real config
+cargo test --features hardware                         # both, default features still on
 ```
 
 No hardware or elevated privileges are needed for `cargo test`. Live

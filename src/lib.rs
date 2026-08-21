@@ -15,15 +15,21 @@
 //! (`embarch-umbrella/Cargo.toml`'s "deliberately absent: probe-rs and
 //! serialport" comment):
 //!
-//! - [`software`] — always available. Software-topology-class detection
-//!   (`local`/`wsl-host`/`remote`) and Core-reachability probing. No
-//!   hardware dependency at all; this is what `embarch-api`/
-//!   `embarch-umbrella` use.
+//! - [`software`] — behind the `software` feature (on by default; implied
+//!   by `bin`). Software-topology-class detection (`local`/`wsl-host`/
+//!   `remote`) and Core-reachability probing, needing `reqwest`/`tokio`.
+//!   This is what `embarch-api`/`embarch-umbrella` use.
 //! - [`hardware`] — behind the `hardware` feature (implied by `bin`).
 //!   Dev-bench port detection, chip hardware-ID readback, enrollment
 //!   storage, and live board-identity validation. Needs `probe-rs`/
-//!   `serialport`; `embarch-core` is the one consumer that turns this on.
+//!   `serialport`; `embarch-core` is the one consumer that turns this on —
+//!   and, since it never calls into `software` at all, is also the one
+//!   consumer that opts out of it (`default-features = false, features =
+//!   ["hardware"]`), so its own Windows build never has to compile
+//!   `reqwest`'s transitive `aws-lc-sys` (a real C-toolchain dependency
+//!   neither Core nor its cross-compilation story has any use for).
 
+#[cfg(feature = "software")]
 pub mod software;
 
 #[cfg(feature = "hardware")]
