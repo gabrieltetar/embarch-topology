@@ -17,7 +17,7 @@ pub use alert::{Alert, DEFAULT_UI_PORT};
 pub use enrollment::EnrolledBoard;
 pub use paths::{alert_log_path, data_dir, enrollment_path, ui_marker_path};
 pub use port::{DevBenchPort, NotFound as DevBenchNotFound, DEV_BENCH_ROLE};
-pub use validate::TopologyMismatch;
+pub use validate::{AttachedProbe, TopologyMismatch};
 
 /// Recent alerts from the durable log — `embarch-topology`'s own UI/CLI
 /// listing, and what a `doctor`-style check reports as evidence rather than
@@ -47,6 +47,14 @@ pub fn resolve_dev_bench_port() -> anyhow::Result<DevBenchPort> {
 /// attached probe, records its live hardware ID against `role`/`chip`.
 pub fn enroll(role: &str, chip: &str) -> anyhow::Result<EnrolledBoard> {
     validate::enroll(role, chip)
+}
+
+/// Every debug probe currently attached, live — read-only, nothing
+/// persisted. What `embarch-topology`'s own UI/CLI shows a human *before*
+/// enrolling, so "exactly one probe attached" is something they can check
+/// ahead of a submission rather than discover from its error.
+pub fn list_attached_probes() -> Vec<AttachedProbe> {
+    validate::list_attached_probes()
 }
 
 /// Re-verifies an already-enrolled board's live identity by the probe's own

@@ -27,10 +27,39 @@
 use anyhow::{Context, Result};
 use probe_rs::probe::list::Lister;
 use probe_rs::Permissions;
+use serde::Serialize;
 
 use super::alert::{self, Alert};
 use super::enrollment::{self, EnrolledBoard};
 use super::hardware_id;
+
+/// One currently-attached debug probe, as `probe-rs` sees it right now —
+/// not persisted anywhere, unlike [`EnrolledBoard`]. What the UI/CLI shows a
+/// human *before* they enroll, so "plug in only the board you mean to
+/// enroll" (this module's own `enroll` error) is something they can check
+/// ahead of time rather than discover from a failed submission.
+#[derive(Debug, Clone, Serialize)]
+pub struct AttachedProbe {
+    pub identifier: String,
+    pub vendor_id: u16,
+    pub product_id: u16,
+    pub serial_number: Option<String>,
+}
+
+/// Every debug probe `probe-rs` currently enumerates, live — the same
+/// enumeration [`enroll`] itself refuses to proceed past more than one of.
+pub fn list_attached_probes() -> Vec<AttachedProbe> {
+    Lister::new()
+        .list_all()
+        .into_iter()
+        .map(|p| AttachedProbe {
+            identifier: p.identifier.clone(),
+            vendor_id: p.vendor_id,
+            product_id: p.product_id,
+            serial_number: p.serial_number.clone(),
+        })
+        .collect()
+}
 
 /// A live check found the enrolled board isn't there, or isn't what was
 /// recorded — downcast an `anyhow::Error` from [`validate_role`]/
