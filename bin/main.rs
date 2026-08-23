@@ -33,13 +33,16 @@ enum Command {
     DevBench,
     /// List every currently-enrolled board.
     List,
-    /// Enroll the single currently-attached debug probe under `role`,
-    /// reading its live hardware ID as `chip`.
+    /// Enroll a debug probe under `role`, reading its live hardware ID as
+    /// `chip`. With more than one probe attached, `--probe-serial` picks
+    /// which one — omitted, exactly one must be attached.
     Enroll {
         #[arg(long)]
         role: String,
         #[arg(long)]
         chip: String,
+        #[arg(long)]
+        probe_serial: Option<String>,
     },
     /// Re-verify an already-enrolled board's live identity, by role.
     Validate {
@@ -88,8 +91,8 @@ fn main() -> anyhow::Result<()> {
                 println!("{}: probe {} chip {} hardware_id {}", b.role, b.probe_serial, b.chip, b.hardware_id);
             }
         }
-        Command::Enroll { role, chip } => {
-            let board = hardware::enroll(&role, &chip)?;
+        Command::Enroll { role, chip, probe_serial } => {
+            let board = hardware::enroll(&role, &chip, probe_serial.as_deref())?;
             println!(
                 "enrolled '{}' as role '{}': probe {}, hardware_id {}",
                 board.chip, board.role, board.probe_serial, board.hardware_id
