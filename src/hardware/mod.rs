@@ -43,10 +43,13 @@ pub fn resolve_dev_bench_port() -> anyhow::Result<DevBenchPort> {
     port::detect()
 }
 
-/// `POST /probes/enroll`'s implementation: refuses anything but exactly one
-/// attached probe, records its live hardware ID against `role`/`chip`.
-pub fn enroll(role: &str, chip: &str) -> anyhow::Result<EnrolledBoard> {
-    validate::enroll(role, chip)
+/// `POST /probes/enroll`'s implementation: records a probe's live hardware
+/// ID against `role`/`chip`. `probe_serial` picks which attached probe when
+/// more than one is present ([`validate::enroll`]'s own doc comment);
+/// `None` requires exactly one to be attached, same as before this param
+/// existed.
+pub fn enroll(role: &str, chip: &str, probe_serial: Option<&str>) -> anyhow::Result<EnrolledBoard> {
+    validate::enroll(role, chip, probe_serial)
 }
 
 /// Every debug probe currently attached, live — read-only, nothing

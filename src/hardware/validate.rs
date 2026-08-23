@@ -189,21 +189,50 @@ pub fn validate_role(role: &str) -> Result<EnrolledBoard> {
 }
 
 /// `enroll_probe`'s implementation (`embarch-api`'s MCP tool of the same
-/// name, via `POST /probes/enroll`): refuses anything but exactly one
-/// attached probe, attaches as `chip`, reads its live hardware ID, and
-/// records the association — overwriting any prior entry for the same probe
-/// serial.
-pub fn enroll(role: &str, chip: &str) -> Result<EnrolledBoard> {
+/// name, via `POST /probes/enroll`): attaches as `chip`, reads its live
+/// hardware ID, and records the association — overwriting any prior entry
+/// for the same probe serial.
+///
+/// `probe_serial`, when given, selects which of possibly-several currently-
+/// attached probes to enroll — the same disambiguation shape `embarch-
+/// core`'s `flash`/`reset` already use (that crate's decision 9), extended
+/// here so a human enrolling two visibly-different boards at once (e.g. a
+/// J-Link DUT alongside dev-bench's own ESP JTAG) doesn't have to physically
+/// isolate them one at a time just to satisfy this function — `embarch-
+/// core`'s own `GET /enroll` page's drag-and-drop UI is the first caller
+/// that needs this (design.md decision 15). Omitted, the original
+/// behavior is unchanged: refuses anything but exactly one attached probe,
+/// the only sane default when there's no other way to tell which one a
+/// caller means.
+///
+/// **This still doesn't — and structurally can't — verify that the probe a
+/// human *picked* really is the board they think it is.** Serial number and
+/// probe identifier are exactly what a same-probe-type ambiguity (decision
+/// 10's own flagged risk: two boards sharing a chip family, e.g. two
+/// J-Links) leaves nothing to tell apart by. `enroll`'s own live hardware-ID
+/// readback below still catches a *wrong chip name* for the picked probe;
+/// it can't catch "right chip, wrong physical board" when both boards
+/// genuinely are that chip. That case still needs physical isolation — no
+/// UI can enroll around it.
+pub fn enroll(role: &str, chip: &str, probe_serial: Option<&str>) -> Result<EnrolledBoard> {
     let lister = Lister::new();
     let probes = lister.list_all();
-    if probes.len() != 1 {
-        anyhow::bail!(
-            "enrollment requires exactly one debug probe attached ({} seen) — plug in only the \
-             board you mean to enroll, then retry",
-            probes.len()
-        );
-    }
-    let info = probes.into_iter().next().expect("checked len == 1 above");
+    let info = match probe_serial {
+        Some(wanted) => probes
+            .into_iter()
+            .find(|p| p.serial_number.as_deref() == Some(wanted))
+            .ok_or_else(|| anyhow::anyhow!("no attached probe with serial '{wanted}' — is it still plugged in?"))?,
+        None => {
+            if probes.len() != 1 {
+                anyhow::bail!(
+                    "enrollment requires exactly one debug probe attached ({} seen) — plug in only the \
+                     board you mean to enroll, or specify which probe by serial",
+                    probes.len()
+                );
+            }
+            probes.into_iter().next().expect("checked len == 1 above")
+        }
+    };
     let serial = info.serial_number.clone().ok_or_else(|| {
         anyhow::anyhow!(
             "the attached probe ({}) reports no USB serial number — it can't be enrolled \
