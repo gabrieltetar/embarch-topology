@@ -27,6 +27,20 @@ pub struct EnrolledBoard {
     pub hardware_id: String,
     /// UTC milliseconds since the epoch.
     pub confirmed_at_utc_ms: u64,
+    /// A separately declared USB serial number for this role's *runtime
+    /// serial link* — meaningful only for [`super::port::DEV_BENCH_ROLE`],
+    /// `None` for every other role. Exists because `probe_serial` above is
+    /// the JTAG debug probe's own serial, and on real dev-bench hardware
+    /// whose runtime link moved to a dedicated UART bridge chip
+    /// (`embarch-core/design.md` decision 21's port migration), that bridge
+    /// is a *different physical USB device* with its own, unrelated serial
+    /// — nothing observable over USB proves the two are the same board, so
+    /// this can't be inferred the way `hardware_id` is; it's a second
+    /// declared fact, set via [`set_link_port_serial`] once a human reads it
+    /// off the actual link port. [`super::port::Filter::resolve`] prefers
+    /// this over its old JTAG-probe-serial fallback when set.
+    #[serde(default)]
+    pub link_port_serial: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -98,6 +112,26 @@ pub fn upsert(board: EnrolledBoard) -> Result<()> {
     save_at(&path, &store)
 }
 
+/// Declares `role`'s runtime-link USB serial (`EnrolledBoard::link_port_serial`'s
+/// own doc comment) — a second, independent fact from the probe-rs identity
+/// readback `enroll`/`upsert` do, since a plain UART bridge has no chip to
+/// attach to and no `hardware_id` to read. `role` must already be enrolled
+/// (via [`super::validate::enroll`]) — this only ever amends an existing
+/// row, it never creates one on its own, so there's always a `probe_serial`/
+/// `chip`/`hardware_id` on record for whatever role this link serial gets
+/// attached to.
+pub fn set_link_port_serial(role: &str, serial: &str) -> Result<()> {
+    let path = paths::enrollment_path()?;
+    let mut store = load_at(&path)?;
+    let board = store
+        .boards
+        .iter_mut()
+        .find(|b| b.role == role)
+        .with_context(|| format!("no board enrolled as role '{role}' yet; enroll it first"))?;
+    board.link_port_serial = Some(serial.to_string());
+    save_at(&path, &store)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,6 +148,7 @@ mod tests {
             chip: "nRF54L15".to_string(),
             hardware_id: "deadbeefcafef00d".to_string(),
             confirmed_at_utc_ms: 1_755_000_000_000,
+            link_port_serial: None,
         }
     }
 
@@ -180,6 +215,50 @@ mod tests {
         let boards = load_at(&path).unwrap().boards;
         assert_eq!(boards.len(), 1, "re-enrolling the same serial must not accumulate a second row");
         assert_eq!(boards[0], updated);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn missing_link_port_serial_deserializes_as_none() {
+        // Pre-existing enrollment.toml rows, written before this field
+        // existed, must keep loading rather than erroring.
+        let toml = r#"
+            [[boards]]
+            probe_serial = "D0:CF:13:ED:F9:30"
+            role = "dev-bench"
+            chip = "esp32c5"
+            hardware_id = "13edf930fffed0cf"
+            confirmed_at_utc_ms = 1787528352457
+        "#;
+        let store: Store = toml::from_str(toml).unwrap();
+        assert_eq!(store.boards[0].link_port_serial, None);
+    }
+
+    #[test]
+    fn set_link_port_serial_amends_an_existing_role_and_round_trips() {
+        let dir = temp_path("link-port-serial-dir");
+        let path = dir.join("enrollment.toml");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut dev_bench = sample("D0:CF:13:ED:F9:30");
+        dev_bench.role = "dev-bench".to_string();
+        dev_bench.chip = "esp32c5".to_string();
+        save_at(&path, &Store { boards: vec![dev_bench] }).unwrap();
+
+        // Reimplement set_link_port_serial against the temp path directly —
+        // the real fn goes through paths::enrollment_path(), not overridable
+        // per-test.
+        let mut store = load_at(&path).unwrap();
+        store.boards.iter_mut().find(|b| b.role == "dev-bench").unwrap().link_port_serial =
+            Some("D607104BD96EF0119D5C489B1045C30F".to_string());
+        save_at(&path, &store).unwrap();
+
+        let reloaded = load_at(&path).unwrap();
+        assert_eq!(
+            reloaded.boards[0].link_port_serial.as_deref(),
+            Some("D607104BD96EF0119D5C489B1045C30F")
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

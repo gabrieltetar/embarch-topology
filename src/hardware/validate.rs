@@ -287,12 +287,20 @@ pub fn enroll(role: &str, chip: &str, probe_serial: Option<&str>) -> Result<Enro
     drop(core);
     drop(session);
 
+    // Re-enrolling under the same probe_serial replaces the whole row
+    // (`enrollment::upsert`'s own doc comment) — carry over any
+    // already-declared `link_port_serial` rather than silently dropping it,
+    // since it's an independent fact this call has nothing to say about.
+    let link_port_serial =
+        enrollment::find(&serial).ok().flatten().and_then(|b| b.link_port_serial);
+
     let board = EnrolledBoard {
         probe_serial: serial,
         role: role.to_string(),
         chip: chip.to_string(),
         hardware_id,
         confirmed_at_utc_ms: enrollment::now_utc_ms(),
+        link_port_serial,
     };
     enrollment::upsert(board.clone())?;
     Ok(board)
