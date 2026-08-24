@@ -60,6 +60,26 @@ pub fn list_attached_probes() -> Vec<AttachedProbe> {
     validate::list_attached_probes()
 }
 
+/// Best-effort early diagnosis for an about-to-fail attach: an unpowered
+/// board is the single most common real cause behind probe-rs's generic
+/// "target did not respond" — confirmed against a real incident, found
+/// enrolling a real DUT that turned out to simply have no power connected
+/// (`embarch-core/design.md` §3 decision 26). Call this right after
+/// opening a probe and before `Probe::attach` — every attach call site in
+/// this crate and `embarch-core` does (decision 8's "one implementation,
+/// multiple call sites," extended here from identity validation to this).
+///
+/// Reads the probe's own sensed target-voltage pin
+/// (`Probe::get_target_voltage`) if it has one — not every probe type
+/// supports this (`Ok(None)`), in which case this can't help and callers
+/// just proceed to attach normally, same as a plausible-looking reading.
+/// Only a suspiciously-low one short-circuits with a message naming the
+/// actual likely cause, before the slower, generically-worded `attach()`
+/// call ever runs.
+pub fn check_target_powered(probe: &mut probe_rs::probe::Probe) -> anyhow::Result<()> {
+    validate::check_target_powered(probe)
+}
+
 /// Re-verifies an already-enrolled board's live identity by the probe's own
 /// USB serial number. On mismatch, the returned error durably logs the
 /// finding and live-pushes it to `embarch-topology`'s UI if one is running,

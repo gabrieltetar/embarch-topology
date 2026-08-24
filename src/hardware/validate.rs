@@ -46,6 +46,40 @@ pub struct AttachedProbe {
     pub serial_number: Option<String>,
 }
 
+/// No real target this suite has ever run against senses below roughly
+/// 1.6V on its normal supply/reference rail (the nRF54L15's own lowest
+/// operating voltage) — placeholder-but-concrete, same posture as every
+/// other hardware-unvalidated constant in this crate's design doc, chosen
+/// to sit comfortably below any real target's operating range while
+/// staying well above genuine unpowered leakage/noise (typically well
+/// under 0.3V on an open, unpowered pin).
+const UNPOWERED_VOLTAGE_THRESHOLD_V: f32 = 1.0;
+
+/// Best-effort early diagnosis for an attach that's about to fail because
+/// the board genuinely has no power — the single most common real-world
+/// cause behind probe-rs's own generic "target did not respond," confirmed
+/// against a real incident (`embarch-core/design.md` §3 decision 26).
+/// Reads the probe's own sensed target-voltage pin
+/// (`Probe::get_target_voltage`) if it has one; not every probe type
+/// supports this (`Ok(None)`), in which case — same as a plausible-looking
+/// reading — this can't help, and the caller just proceeds to attach
+/// normally. Only a suspiciously-low reading short-circuits, with a
+/// message naming the actual likely cause up front rather than leaving a
+/// human to guess from `attach()`'s own generic ARM/access-port error
+/// chain.
+pub fn check_target_powered(probe: &mut probe_rs::probe::Probe) -> Result<()> {
+    if let Ok(Some(voltage)) = probe.get_target_voltage() {
+        if voltage < UNPOWERED_VOLTAGE_THRESHOLD_V {
+            anyhow::bail!(
+                "target appears unpowered — the probe senses only {voltage:.2}V on its target-\
+                 voltage pin, too low for a real supply rail; check the board's power/USB \
+                 connection, then retry"
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Every debug probe `probe-rs` currently enumerates, live — the same
 /// enumeration [`enroll`] itself refuses to proceed past more than one of.
 pub fn list_attached_probes() -> Vec<AttachedProbe> {
@@ -133,9 +167,11 @@ fn validate_known(known: EnrolledBoard) -> Result<EnrolledBoard> {
         }
     };
 
-    let probe = probe_info
+    let mut probe = probe_info
         .open()
         .context("failed to open the enrolled probe for the board-identity gate")?;
+    check_target_powered(&mut probe)
+        .with_context(|| format!("can't validate role '{}'", known.role))?;
     let mut session = probe
         .attach(known.chip.as_str(), Permissions::default())
         .with_context(|| format!("failed to attach to '{}' for the board-identity gate", known.chip))?;
@@ -241,7 +277,8 @@ pub fn enroll(role: &str, chip: &str, probe_serial: Option<&str>) -> Result<Enro
         )
     })?;
 
-    let probe = info.open().context("failed to open the attached debug probe")?;
+    let mut probe = info.open().context("failed to open the attached debug probe")?;
+    check_target_powered(&mut probe).context("can't enroll")?;
     let mut session = probe
         .attach(chip, Permissions::default())
         .with_context(|| format!("failed to attach to '{chip}'"))?;
