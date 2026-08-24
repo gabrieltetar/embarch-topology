@@ -285,11 +285,28 @@ async fn index() -> Html<String> {
 async fn mismatch(Path(id): Path<String>) -> Html<String> {
     let alerts = hardware::recent_alerts(500).unwrap_or_default();
     match alerts.into_iter().find(|a| a.id == id) {
-        Some(a) => page(format!(
-            "<h2>Mismatch {}</h2><pre>{}</pre>",
-            html_escape(&a.id),
-            html_escape(&serde_json::to_string_pretty(&a).unwrap_or_default())
-        )),
+        Some(a) => {
+            // Closes the last piece of §5's "click-to-fix flow" gap: a
+            // `fix_it_url` landing here (design.md §3 decision 12's own
+            // "relay, don't auto-open" `TopologyMismatch` field) previously
+            // dead-ended at this JSON dump. One more hop, same "only when
+            // Core is actually reachable" posture as `index()`'s own
+            // per-alert link.
+            let resolved = software::resolve_software_topology(software::DEFAULT_CORE_PORT, None, None).await;
+            let reenroll = match resolved.base_url() {
+                Some(base) => {
+                    let href = html_escape(&enroll_link(base, Some(&a.role)));
+                    format!("<p><a href=\"{href}\">Re-enroll {}</a></p>", html_escape(&a.role))
+                }
+                None => String::new(),
+            };
+            page(format!(
+                "<h2>Mismatch {}</h2>{}<pre>{}</pre>",
+                html_escape(&a.id),
+                reenroll,
+                html_escape(&serde_json::to_string_pretty(&a).unwrap_or_default())
+            ))
+        }
         None => page(format!("<p>No alert with id {} in the durable log.</p>", html_escape(&id))),
     }
 }
