@@ -147,6 +147,31 @@ fn raise(known: &EnrolledBoard, live_hardware_id: Option<String>, reason: String
     })
 }
 
+/// No board is enrolled under this role (or serial) yet — a normal,
+/// expected state (design.md §3 decision 7's "declared facts can be unset"),
+/// not a bug. Downcastable so a caller — `embarch-core`'s new `POST
+/// /validate` (design.md §3 decision 28) — can tell it apart from a genuine
+/// [`TopologyMismatch`] or an unrelated I/O error and answer with a `404`
+/// rather than a `500`, the same "no guessing" idiom [`super::port::NotFound`]
+/// already established for this crate's other structured errors.
+#[derive(Debug)]
+pub struct NotEnrolled {
+    pub role: String,
+}
+
+impl std::fmt::Display for NotEnrolled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "no board enrolled under role '{}' — enroll it first (`embarch-topology enroll`), \
+             with only this board's probe attached",
+            self.role
+        )
+    }
+}
+
+impl std::error::Error for NotEnrolled {}
+
 fn validate_known(known: EnrolledBoard) -> Result<EnrolledBoard> {
     let lister = Lister::new();
     let probe_info = match lister
@@ -215,12 +240,8 @@ pub fn validate_serial(serial: &str) -> Result<EnrolledBoard> {
 /// bridge chip; see `super::port`'s own doc comment). `embarch-core`'s
 /// dev-bench handshake calls this before ever opening the link.
 pub fn validate_role(role: &str) -> Result<EnrolledBoard> {
-    let known = enrollment::find_by_role(role)?.with_context(|| {
-        format!(
-            "no board enrolled under role '{role}' — enroll it first (`embarch-topology enroll`), \
-             with only this board's probe attached"
-        )
-    })?;
+    let known = enrollment::find_by_role(role)?
+        .ok_or_else(|| anyhow::Error::new(NotEnrolled { role: role.to_string() }))?;
     validate_known(known)
 }
 
