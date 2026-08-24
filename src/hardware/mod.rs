@@ -17,7 +17,7 @@ pub use alert::{Alert, DEFAULT_UI_PORT};
 pub use enrollment::EnrolledBoard;
 pub use paths::{alert_log_path, data_dir, enrollment_path, ui_marker_path};
 pub use port::{DevBenchPort, NotFound as DevBenchNotFound, DEV_BENCH_ROLE};
-pub use validate::{AttachedProbe, TopologyMismatch};
+pub use validate::{AttachedProbe, NotEnrolled, TopologyMismatch};
 
 /// Recent alerts from the durable log — `embarch-topology`'s own UI/CLI
 /// listing, and what a `doctor`-style check reports as evidence rather than
