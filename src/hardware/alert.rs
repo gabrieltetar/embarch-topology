@@ -181,6 +181,7 @@ mod tests {
             chip: "esp32c5".to_string(),
             hardware_id: "aaaaaaaabbbbbbbb".to_string(),
             confirmed_at_utc_ms: 1_755_000_000_000,
+            link_port_serial: None,
         }
     }
 

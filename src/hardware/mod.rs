@@ -36,6 +36,16 @@ pub fn find_enrolled_by_role(role: &str) -> anyhow::Result<Option<EnrolledBoard>
     enrollment::find_by_role(role)
 }
 
+/// Declares dev-bench's runtime-link USB serial — a second fact from its
+/// JTAG probe's own serial, needed when the two are different physical USB
+/// devices (`EnrolledBoard::link_port_serial`'s own doc comment). The role
+/// must already be enrolled; this only ever amends that existing row.
+/// [`resolve_dev_bench_port`] prefers this over its old JTAG-probe-serial
+/// fallback once it's set.
+pub fn set_dev_bench_link_port_serial(serial: &str) -> anyhow::Result<()> {
+    enrollment::set_link_port_serial(DEV_BENCH_ROLE, serial)
+}
+
 /// Finds `embarch-dev-bench`'s serial port on this machine, live, on every
 /// call (design.md §3 decisions 3, 9 — no env var overrides any more).
 /// Blocking — call via `spawn_blocking` on an async runtime.

@@ -8,11 +8,22 @@
 //! were exactly the mechanism that caused the incident this crate exists to
 //! prevent (design.md §1). What's left of `EMBARCH_DEV_BENCH_SERIAL`'s old
 //! job — disambiguating dev-bench from some other SEGGER-VID device on the
-//! same bench — is now covered *only* by [`enrollment`](super::enrollment)'s
-//! dev-bench-role fallback, which was already the stronger of the two
-//! signals (a live hardware-ID readback at enrollment time, not an
-//! operator-typed string) even back when the env var still existed as a
-//! second, parallel way to say the same thing.
+//! same bench — is covered by [`enrollment`](super::enrollment)'s dev-bench-
+//! role fallback (the enrolled JTAG probe's own serial) *when* dev-bench's
+//! link and its JTAG probe are the same physical USB device. On real
+//! hardware where they aren't — dev-bench's link moved to its own UART
+//! bridge chip, this module's own `SILABS_VID` doc comment — that fallback
+//! can never match anything, and a second SEGGER-VID device on the bench
+//! (e.g. a DUT's own separate J-Link) is then indistinguishable from dev-
+//! bench's real link by VID/product alone. `EnrolledBoard::link_port_serial`
+//! is the fix: a second declared fact — the link port's own USB serial, set
+//! once via `enrollment::set_link_port_serial` — that [`Filter::resolve`]
+//! prefers, hard, over the JTAG-probe-serial fallback whenever it's present.
+//! Found live, 2026-08-24: enrolling a real DUT (its own J-Link) alongside
+//! an already-enrolled dev-bench (link on a Silabs bridge) made [`select`]
+//! genuinely ambiguous between the DUT's J-Link VCOM and dev-bench's real
+//! link — a gap no prior session had exercised, since none had both a
+//! JTAG-capable DUT and a Silabs-bridge dev-bench enrolled at once.
 //!
 //! No hardware is opened here — this only reads USB descriptors already
 //! enumerated by the OS. Actually opening the port and running a link's own
@@ -147,16 +158,29 @@ impl Filter {
     /// degrades to no serial fallback at all, plus a logged warning, rather
     /// than breaking detection entirely over what's meant to be a
     /// convenience default, not a hard requirement.
+    ///
+    /// Prefers the dev-bench role's declared
+    /// [`EnrolledBoard::link_port_serial`](super::enrollment::EnrolledBoard::link_port_serial)
+    /// when set — a directly declared fact about the link port itself, so
+    /// it narrows *hard* (`serial_is_fallback: false`), same as an explicit
+    /// serial always has. Falls back to the JTAG probe's own serial
+    /// (`serial_is_fallback: true`, unchanged from before this field
+    /// existed) only when no link serial has been declared — the common
+    /// case for dev-bench hardware whose link and JTAG probe really are the
+    /// same physical device, where the old inference already works.
     pub fn resolve() -> Result<Self> {
-        let serial = match enrollment::find_by_role(DEV_BENCH_ROLE) {
-            Ok(Some(board)) => Some(board.probe_serial),
-            Ok(None) => None,
+        let (serial, serial_is_fallback) = match enrollment::find_by_role(DEV_BENCH_ROLE) {
+            Ok(Some(board)) => match board.link_port_serial {
+                Some(link_serial) => (Some(link_serial), false),
+                None => (Some(board.probe_serial), true),
+            },
+            Ok(None) => (None, true),
             Err(e) => {
                 tracing::warn!(
                     "failed to read enrollment while resolving dev-bench's serial fallback, \
                      continuing without it: {e:?}"
                 );
-                None
+                (None, true)
             }
         };
 
@@ -164,7 +188,7 @@ impl Filter {
             serial,
             product_needle: Some(DEFAULT_PRODUCT_NEEDLE.to_string()),
             product_needle_is_default: true,
-            serial_is_fallback: true,
+            serial_is_fallback,
             interface: None,
         })
     }
@@ -254,9 +278,12 @@ pub fn select(ports: &[SerialPortInfo], filter: &Filter) -> Result<DevBenchPort>
 
         if !(one_probe && interfaces_known) {
             bail!(
-                "ambiguous embarch-dev-bench detection — {} candidate ports match:\n{}\nenroll \
-                 the intended board's serial via `embarch-topology enroll --role dev-bench`, or \
-                 physically disconnect the other candidate",
+                "ambiguous embarch-dev-bench detection — {} candidate ports match:\n{}\nif \
+                 dev-bench's runtime link is on its own USB device (a UART bridge, separate from \
+                 its JTAG probe), declare that port's own serial with `embarch-topology \
+                 set-dev-bench-link --serial <serial>`; otherwise re-enroll the intended board's \
+                 serial via `embarch-topology enroll --role dev-bench`, or physically disconnect \
+                 the other candidate",
                 candidates.len(),
                 describe(&candidates)
             );
@@ -452,6 +479,46 @@ mod tests {
         ];
         let err = select(&ports, &default_filter()).unwrap_err();
         assert!(format!("{err}").contains("ambiguous"));
+    }
+
+    #[test]
+    fn a_declared_link_serial_resolves_the_real_ambiguity_a_dut_probe_introduces() {
+        // The exact real-hardware shape found live 2026-08-24: dev-bench's
+        // real link (Silabs bridge, COM13) alongside a separately-enrolled
+        // DUT's own J-Link, whose VCOM (COM5) shares the JLink product
+        // string and so passes the default product-needle filter too.
+        let ports = vec![
+            usb(
+                "COM13",
+                SILABS_VID,
+                Some("Silicon Labs CP210x USB to UART Bridge"),
+                Some("D607104BD96EF0119D5C489B1045C30F"),
+                None,
+            ),
+            usb(
+                "COM5",
+                SEGGER_VID,
+                Some("JLink CDC UART Port"),
+                Some("000852006107"), // the DUT's own J-Link, not dev-bench
+                Some(0),
+            ),
+        ];
+
+        // Unresolved (link_port_serial unset): genuinely ambiguous, same as
+        // before this fix — the JTAG-probe-serial fallback can't match
+        // either candidate, so both remain.
+        let unresolved = Filter { serial: None, serial_is_fallback: true, ..default_filter() };
+        let err = select(&ports, &unresolved).unwrap_err();
+        assert!(format!("{err}").contains("ambiguous"));
+
+        // Declared (serial_is_fallback: false, as `Filter::resolve` now sets
+        // when `link_port_serial` is present): hard-narrows to COM13 alone.
+        let declared = Filter {
+            serial: Some("D607104BD96EF0119D5C489B1045C30F".to_string()),
+            serial_is_fallback: false,
+            ..default_filter()
+        };
+        assert_eq!(select(&ports, &declared).unwrap().port_name, "COM13");
     }
 
     #[test]

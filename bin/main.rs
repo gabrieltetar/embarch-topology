@@ -49,6 +49,16 @@ enum Command {
         #[arg(long)]
         role: String,
     },
+    /// Declare dev-bench's runtime-link USB serial — needed when its link
+    /// (a UART bridge) is a different physical USB device from its JTAG
+    /// probe, so the JTAG probe's serial can't be used to tell the link
+    /// apart from some other SEGGER-VID device on the same bench (e.g. a
+    /// DUT's own J-Link). dev-bench must already be enrolled via `enroll
+    /// --role dev-bench` first.
+    SetDevBenchLink {
+        #[arg(long)]
+        serial: String,
+    },
     /// Print the most recent topology-mismatch alerts from the durable log.
     Alerts {
         #[arg(long, default_value_t = 20)]
@@ -88,7 +98,11 @@ fn main() -> anyhow::Result<()> {
         }
         Command::List => {
             for b in hardware::list_enrolled()? {
-                println!("{}: probe {} chip {} hardware_id {}", b.role, b.probe_serial, b.chip, b.hardware_id);
+                print!("{}: probe {} chip {} hardware_id {}", b.role, b.probe_serial, b.chip, b.hardware_id);
+                match &b.link_port_serial {
+                    Some(s) => println!(" link_port_serial {s}"),
+                    None => println!(),
+                }
             }
         }
         Command::Enroll { role, chip, probe_serial } => {
@@ -109,6 +123,10 @@ fn main() -> anyhow::Result<()> {
                 std::process::exit(1);
             }
         },
+        Command::SetDevBenchLink { serial } => {
+            hardware::set_dev_bench_link_port_serial(&serial)?;
+            println!("dev-bench link port serial set to '{serial}'");
+        }
         Command::Alerts { limit } => {
             for a in hardware::recent_alerts(limit)? {
                 println!(
