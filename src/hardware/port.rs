@@ -67,9 +67,14 @@ pub const DEFAULT_PRODUCT_NEEDLE: &str = "jlink";
 /// [`Filter::resolve`]'s fallback.
 pub const DEV_BENCH_ROLE: &str = "dev-bench";
 
-/// One detected port, plus whatever USB identity the OS reported for it.
+/// One detected serial port, plus whatever USB identity the OS reported for
+/// it. Named for dev-bench because that was the only thing this module
+/// resolved when it was written; [`SignalLink`](super::signal::SignalLink)'s
+/// `Route::Direct` (design.md §3 decision 18) resolves through the same
+/// machinery and gets the same shape back, which is why the type now has a
+/// neutral name and [`DevBenchPort`] is an alias rather than a second type.
 #[derive(Debug, Clone, Serialize)]
-pub struct DevBenchPort {
+pub struct DetectedPort {
     pub port_name: String,
     /// `"segger-vid-match"`, `"espressif-vid-match"`, or `"silabs-vid-match"`
     /// — which rule produced this. No `"env-override"` variant any more
@@ -81,6 +86,12 @@ pub struct DevBenchPort {
     pub product: Option<String>,
     pub interface: Option<u8>,
 }
+
+/// What every existing caller (`embarch-core`, this crate's own CLI) calls
+/// [`DetectedPort`]. Kept as an alias rather than renamed at every call
+/// site: the shape is identical, and "the dev-bench port" is still what
+/// [`detect`] specifically returns.
+pub type DevBenchPort = DetectedPort;
 
 fn detected_by_for_vid(vid: u16) -> &'static str {
     match vid {
@@ -144,6 +155,18 @@ pub struct Filter {
     /// cautiously than an explicit one used to be.
     pub serial_is_fallback: bool,
     pub interface: Option<u8>,
+    /// Skip [`select`]'s VID pre-filter entirely.
+    ///
+    /// `false` (the default, and dev-bench's own path) keeps the
+    /// SEGGER/Silicon-Labs gate that stands in for "this is plausibly a
+    /// bench link at all" when nothing more specific is known. `true` is for
+    /// a route whose `port_serial` is a **declared** fact
+    /// ([`SignalLink`](super::signal::SignalLink)'s `Route::Direct`,
+    /// design.md §3 decision 18): the serial already identifies exactly one
+    /// device, so gating on VID could only ever exclude the right answer —
+    /// a DUT signal may perfectly well land on an FTDI or CH340 bridge
+    /// nobody has taught this module about.
+    pub no_vid_gate: bool,
 }
 
 impl Filter {
@@ -190,7 +213,24 @@ impl Filter {
             product_needle_is_default: true,
             serial_is_fallback,
             interface: None,
+            no_vid_gate: false,
         })
+    }
+
+    /// Narrows to exactly one declared USB serial, with no VID or
+    /// product-string gate — [`super::signal`]'s `Route::Direct` resolution
+    /// (design.md §3 decision 18). A declared serial is a fact a human read
+    /// off the actual device, so it narrows hard, the same way
+    /// `EnrolledBoard::link_port_serial` does (decision 17).
+    pub fn for_declared_serial(serial: &str) -> Self {
+        Self {
+            serial: Some(serial.to_string()),
+            product_needle: None,
+            product_needle_is_default: false,
+            serial_is_fallback: false,
+            interface: None,
+            no_vid_gate: true,
+        }
     }
 }
 
@@ -203,12 +243,12 @@ fn normalize(s: &str) -> String {
         .collect()
 }
 
-fn as_candidate(info: &SerialPortInfo) -> Option<DevBenchPort> {
+fn as_candidate(info: &SerialPortInfo) -> Option<DetectedPort> {
     let SerialPortType::UsbPort(usb) = &info.port_type else {
         return None;
     };
 
-    Some(DevBenchPort {
+    Some(DetectedPort {
         port_name: info.port_name.clone(),
         detected_by: detected_by_for_vid(usb.vid),
         vendor_id: Some(usb.vid),
@@ -222,17 +262,19 @@ fn as_candidate(info: &SerialPortInfo) -> Option<DevBenchPort> {
 /// Applies the VID + serial/product/interface rules to an already-enumerated
 /// port list. Split out from [`detect`] so the whole heuristic is
 /// unit-testable with no hardware involved.
-pub fn select(ports: &[SerialPortInfo], filter: &Filter) -> Result<DevBenchPort> {
-    let mut candidates: Vec<DevBenchPort> = ports
+pub fn select(ports: &[SerialPortInfo], filter: &Filter) -> Result<DetectedPort> {
+    let mut candidates: Vec<DetectedPort> = ports
         .iter()
         .filter_map(as_candidate)
-        .filter(|c| matches!(c.vendor_id, Some(SEGGER_VID) | Some(SILABS_VID)))
+        .filter(|c| {
+            filter.no_vid_gate || matches!(c.vendor_id, Some(SEGGER_VID) | Some(SILABS_VID))
+        })
         .collect();
     let candidate_vid_ports_seen = candidates.len();
 
     if let Some(serial) = &filter.serial {
         let want = normalize(serial);
-        let narrowed: Vec<DevBenchPort> = candidates
+        let narrowed: Vec<DetectedPort> = candidates
             .iter()
             .filter(|c| c.serial_number.as_deref().map(normalize) == Some(want.clone()))
             .cloned()
@@ -308,7 +350,7 @@ pub fn select(ports: &[SerialPortInfo], filter: &Filter) -> Result<DevBenchPort>
     Ok(candidates.remove(0))
 }
 
-fn describe(candidates: &[DevBenchPort]) -> String {
+fn describe(candidates: &[DetectedPort]) -> String {
     candidates
         .iter()
         .map(|c| {
@@ -370,6 +412,7 @@ mod tests {
             product_needle_is_default: true,
             serial_is_fallback: true,
             interface: None,
+            no_vid_gate: false,
         }
     }
 

@@ -11,12 +11,16 @@ mod enrollment;
 mod hardware_id;
 mod paths;
 mod port;
+pub mod signal;
 mod validate;
 
 pub use alert::{Alert, DEFAULT_UI_PORT};
 pub use enrollment::EnrolledBoard;
 pub use paths::{alert_log_path, data_dir, enrollment_path, ui_marker_path};
-pub use port::{DevBenchPort, NotFound as DevBenchNotFound, DEV_BENCH_ROLE};
+pub use port::{DetectedPort, DevBenchPort, NotFound as DevBenchNotFound, DEV_BENCH_ROLE};
+pub use signal::{
+    Route, SignalDirection, SignalLink, SignalMismatch, SignalNotDeclared,
+};
 pub use validate::{AttachedProbe, NotEnrolled, TopologyMismatch};
 
 /// Recent alerts from the durable log — `embarch-topology`'s own UI/CLI
@@ -44,6 +48,45 @@ pub fn find_enrolled_by_role(role: &str) -> anyhow::Result<Option<EnrolledBoard>
 /// fallback once it's set.
 pub fn set_dev_bench_link_port_serial(serial: &str) -> anyhow::Result<()> {
     enrollment::set_link_port_serial(DEV_BENCH_ROLE, serial)
+}
+
+/// Every declared DUT signal link (design.md §3 decision 18).
+pub fn list_signals() -> anyhow::Result<Vec<SignalLink>> {
+    signal::list()
+}
+
+/// Look up one declared signal by the name a `Study` taps it by.
+pub fn find_signal(name: &str) -> anyhow::Result<Option<SignalLink>> {
+    signal::find(name)
+}
+
+/// Declares (or re-declares) where a named signal currently goes — the
+/// write behind Core's future `POST /signals` (design.md §5). Idempotent by
+/// name; re-declaring is how a route migrates.
+pub fn declare_signal(link: SignalLink) -> anyhow::Result<()> {
+    signal::declare(link)
+}
+
+/// Removes a declared signal. `Ok(false)` if nothing was declared under
+/// that name.
+pub fn remove_signal(name: &str) -> anyhow::Result<bool> {
+    signal::remove(name)
+}
+
+/// Resolves a `Route::Direct` signal to the serial port currently carrying
+/// it, live, reusing the same `Filter` machinery dev-bench's own link
+/// resolution uses (design.md §3 decisions 17, 18). Blocking — call via
+/// `spawn_blocking` on an async runtime.
+pub fn resolve_signal_port(name: &str) -> anyhow::Result<DetectedPort> {
+    signal::resolve_port(name)
+}
+
+/// Confirms a declared signal is where it says it is, before an operation
+/// that needs it (design.md §3 decision 18). See
+/// [`signal::validate`] for exactly what this can and cannot honestly
+/// assert.
+pub fn validate_signal(name: &str) -> anyhow::Result<SignalLink> {
+    signal::validate(name)
 }
 
 /// Finds `embarch-dev-bench`'s serial port on this machine, live, on every

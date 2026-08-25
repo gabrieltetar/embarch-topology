@@ -43,10 +43,19 @@ pub struct EnrolledBoard {
     pub link_port_serial: Option<String>,
 }
 
+/// `enrollment.toml`'s whole contents: the enrolled-board table this file
+/// was written for, plus the declared-signal table design.md §3 decision 18
+/// added alongside it. One file, because both are the same kind of thing —
+/// a declared fact about what is physically wired to what, which no
+/// detection can produce.
 #[derive(Debug, Default, Serialize, Deserialize)]
-struct Store {
+pub struct Store {
     #[serde(default)]
-    boards: Vec<EnrolledBoard>,
+    pub boards: Vec<EnrolledBoard>,
+    /// `#[serde(default)]` so an `enrollment.toml` written before signals
+    /// existed keeps loading, exactly as `link_port_serial` does.
+    #[serde(default)]
+    pub signals: Vec<super::signal::SignalLink>,
 }
 
 pub fn now_utc_ms() -> u64 {
@@ -74,6 +83,19 @@ fn save_at(path: &Path, store: &Store) -> Result<()> {
     let contents = toml::to_string_pretty(store).context("failed to serialize enrollment")?;
     std::fs::write(path, contents)
         .with_context(|| format!("failed to write enrollment file at {}", path.display()))
+}
+
+/// The whole store, for callers that own one of its tables
+/// ([`super::signal`]). Board-only callers use [`list`]/[`find`] instead.
+pub fn load_store() -> Result<Store> {
+    load_at(&paths::enrollment_path()?)
+}
+
+/// Writes the whole store back. Pairs with [`load_store`]: a caller that
+/// edits one table must round-trip the other untouched, which is why neither
+/// side ever writes a `Store` it didn't just load.
+pub fn save_store(store: &Store) -> Result<()> {
+    save_at(&paths::enrollment_path()?, store)
 }
 
 /// Look up a probe's enrollment by serial number. `Ok(None)` is a normal
@@ -167,7 +189,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
 
         let board = sample("000852006107");
-        save_at(&path, &Store { boards: vec![board.clone()] }).unwrap();
+        save_at(&path, &Store { boards: vec![board.clone()], signals: Vec::new() }).unwrap();
 
         let found = load_at(&path).unwrap().boards.into_iter().find(|b| b.probe_serial == board.probe_serial);
         assert_eq!(found, Some(board));
@@ -184,7 +206,7 @@ mod tests {
         let mut dev_bench = sample("D0:CF:13:ED:F9:30");
         dev_bench.role = "dev-bench".to_string();
         dev_bench.chip = "esp32c5".to_string();
-        save_at(&path, &Store { boards: vec![sample("000852006107"), dev_bench.clone()] }).unwrap();
+        save_at(&path, &Store { boards: vec![sample("000852006107"), dev_bench.clone()], signals: Vec::new() }).unwrap();
 
         let found = load_at(&path).unwrap().boards.into_iter().find(|b| b.role == "dev-bench");
         assert_eq!(found, Some(dev_bench));
@@ -244,7 +266,7 @@ mod tests {
         let mut dev_bench = sample("D0:CF:13:ED:F9:30");
         dev_bench.role = "dev-bench".to_string();
         dev_bench.chip = "esp32c5".to_string();
-        save_at(&path, &Store { boards: vec![dev_bench] }).unwrap();
+        save_at(&path, &Store { boards: vec![dev_bench], signals: Vec::new() }).unwrap();
 
         // Reimplement set_link_port_serial against the temp path directly —
         // the real fn goes through paths::enrollment_path(), not overridable
