@@ -1,8 +1,13 @@
-//! `embarch-topology`: the thin CLI + local web UI over this crate's own
-//! functions (design.md §3 decisions 5, 8) — a human sees exactly what
-//! `embarch-core` enforces live, because it's literally the same code.
-
-mod ui;
+//! `embarch-topology`: the thin CLI over this crate's own functions
+//! (design.md §3 decision 8) — a human sees exactly what `embarch-core`
+//! enforces live, because it's literally the same code.
+//!
+//! **The local web UI this binary used to also serve (`Ui` subcommand,
+//! `bin/ui.rs`) is retired, 2026-08-24** — `embarch-ui` covers the same
+//! ground now (`embarch-doc/embarch-ui/milestone-1.md` §4.9). Every
+//! read-only function `bin/ui.rs` called (`list_enrolled`, `recent_alerts`,
+//! `list_attached_probes`, etc.) stays right where it was, in `hardware`
+//! below — only the page/server that rendered them here is gone.
 
 use clap::{Parser, Subcommand};
 use embarch_topology::hardware;
@@ -10,7 +15,7 @@ use embarch_topology::software::{self, DEFAULT_CORE_PORT};
 
 #[derive(Parser)]
 #[command(name = "embarch-topology", version)]
-#[command(about = "EmbArch's software/hardware topology — inspect, enroll, validate, serve a local UI")]
+#[command(about = "EmbArch's software/hardware topology — inspect, enroll, validate")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -63,12 +68,6 @@ enum Command {
     Alerts {
         #[arg(long, default_value_t = 20)]
         limit: usize,
-    },
-    /// Serve the local web UI (design.md §3 decision 5) — loopback-only,
-    /// for the duration of this process. Ctrl-C to stop.
-    Ui {
-        #[arg(long, default_value_t = hardware::DEFAULT_UI_PORT)]
-        port: u16,
     },
 }
 
@@ -134,10 +133,6 @@ fn main() -> anyhow::Result<()> {
                     a.occurred_at_utc_ms, a.role, a.probe_serial, a.reason
                 );
             }
-        }
-        Command::Ui { port } => {
-            let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
-            rt.block_on(ui::serve(port))?;
         }
     }
 

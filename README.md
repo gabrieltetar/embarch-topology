@@ -31,8 +31,11 @@ Two things built from one codebase:
      neither `reqwest` nor its transitive `aws-lc-sys` (a real C-toolchain
      dependency, irrelevant to Core's own hardware-facing job).
 2. **A thin `embarch-topology` binary** (`bin/`, `features = ["bin"]`): a
-   CLI plus a loopback-only local web UI, wrapping the exact same library
-   functions, for a human to inspect or fix things directly.
+   CLI wrapping the exact same library functions, for a human to inspect or
+   fix things directly. Used to also serve a loopback-only local web UI
+   (`ui` subcommand) — retired 2026-08-24 in favor of `embarch-ui`'s
+   Topology tab, which covers the same ground over `embarch-core`'s HTTP
+   API instead (`embarch-doc/embarch-ui/milestone-1.md` §4.9).
 
 ## Depending on this crate
 
@@ -44,12 +47,11 @@ embarch-topology = { path = "../embarch-topology" }                             
 embarch-topology = { path = "../embarch-topology", default-features = false, features = ["hardware"] } # hardware-topology only (embarch-core)
 ```
 
-## Building the CLI/UI
+## Building the CLI
 
 ```sh
 cargo run --features bin -- --help
 cargo run --features bin -- status
-cargo run --features bin -- ui
 ```
 
 ## Testing
@@ -61,7 +63,7 @@ cargo test --features hardware                         # both, default features 
 ```
 
 No hardware or elevated privileges are needed for `cargo test`. Live
-`enroll`/`ui`/`validate` runs do need write access to this crate's own data
+`enroll`/`validate` runs do need write access to this crate's own data
 directory (`/var/lib/embarch/topology` on Linux/macOS, `%ProgramData%\embarch\topology`
 on Windows) — the same machine-wide, admin-owned location `embarch-core`'s
 token file already uses, for the same reason (design.md §5's storage-location

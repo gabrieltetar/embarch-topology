@@ -3,17 +3,18 @@ name = "embarch-topology"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "The EmbArch suite's shared software- and hardware-topology crate: resolve_software_topology()/resolve_dev_bench_port()/enrollment/validate(), linked live by embarch-core, embarch-api, and embarch-umbrella, plus a thin CLI/UI binary over the same functions. embarch-doc/embarch-topology/design.md is the source of truth."
+description = "The EmbArch suite's shared software- and hardware-topology crate: resolve_software_topology()/resolve_dev_bench_port()/enrollment/validate(), linked live by embarch-core, embarch-api, and embarch-umbrella, plus a thin CLI binary over the same functions. embarch-doc/embarch-topology/design.md is the source of truth."
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
-# The `embarch-topology` binary (CLI + local web UI, design.md §3 decision 5)
-# is a `[[bin]]` target in this same package rather than a separate crate —
-# same shape as embarch-study-designer's `extract-gatt-config` tool
-# (design.md §5's cross-repo-dependency precedent this repo follows). Gated
-# behind the `bin` feature so a plain library consumer (embarch-core with
+# The `embarch-topology` binary (CLI, design.md §3 decision 5 — its local web
+# UI half retired 2026-08-24, embarch-ui/milestone-1.md §4.9) is a `[[bin]]`
+# target in this same package rather than a separate crate — same shape as
+# embarch-study-designer's `extract-gatt-config` tool (design.md §5's
+# cross-repo-dependency precedent this repo follows). Gated behind the `bin`
+# feature so a plain library consumer (embarch-core with
 # `default-features = false, features = ["hardware"]`, embarch-api/
-# embarch-umbrella with default features) never resolves or builds axum/clap.
+# embarch-umbrella with default features) never resolves or builds clap.
 [[bin]]
 name = "embarch-topology"
 path = "bin/main.rs"
@@ -38,8 +39,9 @@ reqwest = { version = "0.13.4", default-features = false, features = ["rustls"],
 # `rt`/`macros`/`sync`/`time` cover `resolve_software_topology()`'s async fn.
 # Nothing under `hardware` alone needs tokio at all (`alert.rs`'s loopback
 # push is a raw, sync `std::net::TcpStream`, deliberately — see that file's
-# own doc comment). The heavier `rt-multi-thread`/`net`/`fs`/`signal` the UI
-# server needs are added only by the `bin` feature below.
+# own doc comment). The `bin` feature no longer needs anything heavier than
+# this since its own web-server half was retired (2026-08-24) — `Status`,
+# its one async subcommand, runs on a plain `new_current_thread` runtime.
 tokio = { version = "1.53.0", features = ["rt", "macros", "sync", "time"], optional = true }
 
 # ---- feature-gated under `hardware` (embarch-core is the one consumer) or
@@ -58,13 +60,7 @@ toml = { version = "1.1", optional = true }
 serde_json = { version = "1.0.150", optional = true }
 
 # ---- feature-gated: only pulled in by this crate's own `bin` target.
-axum = { version = "0.8.9", optional = true }
 clap = { version = "4.6.2", features = ["derive"], optional = true }
-# The UI's `/events` SSE endpoint: `hardware::alert::push_live`'s loopback
-# POST lands in `bin/ui.rs`'s `broadcast` channel, and these two turn that
-# channel into the `Stream` axum's SSE response wants.
-futures-util = { version = "0.3.34", optional = true }
-tokio-stream = { version = "0.1", features = ["sync"], optional = true }
 
 [features]
 # `software` on by default: the common case (embarch-api/embarch-umbrella)
@@ -80,23 +76,12 @@ software = ["dep:reqwest", "dep:tokio"]
 # needs probe-rs/serialport, so it's opt-in. embarch-core is the one
 # consumer that enables it.
 hardware = ["dep:probe-rs", "dep:serialport", "dep:serde", "dep:toml", "dep:serde_json"]
-# This crate's own CLI/UI binary. Implies both halves (the whole point of
-# the binary is to run the identical validation/enrollment logic Core runs,
+# This crate's own CLI binary. Implies both halves (the whole point of the
+# binary is to run the identical validation/enrollment logic Core runs,
 # design.md §3 decision 8, plus report software topology like `doctor`
-# does) plus the local web server and its JSON bodies.
-bin = [
-    "hardware",
-    "software",
-    "dep:axum",
-    "dep:clap",
-    "dep:futures-util",
-    "dep:tokio-stream",
-    "dep:tracing-subscriber",
-    "tokio/rt-multi-thread",
-    "tokio/net",
-    "tokio/fs",
-    "tokio/signal",
-]
+# does). Used to also imply a local web server's dependencies — retired
+# 2026-08-24 (embarch-ui/milestone-1.md §4.9) along with `bin/ui.rs` itself.
+bin = ["hardware", "software", "dep:clap", "dep:tracing-subscriber"]
 
 [dev-dependencies]
 tokio = { version = "1.53.0", features = ["rt-multi-thread", "macros"] }
