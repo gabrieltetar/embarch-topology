@@ -18,7 +18,7 @@ pub use alert::{Alert, UI_HOST, UI_PORT};
 pub use enrollment::EnrolledBoard;
 pub use hardware_id::{compare_self_reported, SelfReportedIdentity};
 pub use paths::{alert_log_path, data_dir, enrollment_path};
-pub use port::{DetectedPort, DevBenchPort, NotFound as DevBenchNotFound, DEV_BENCH_ROLE};
+pub use port::{DetectedPort, DevBenchPort, NotFound as DevBenchNotFound, DEV_BENCH_ROLE, ENUMERATED};
 pub use signal::{
     Route, SignalDirection, SignalLink, SignalMismatch, SignalNotDeclared,
 };
@@ -95,6 +95,17 @@ pub fn validate_signal(name: &str) -> anyhow::Result<SignalLink> {
 /// Blocking — call via `spawn_blocking` on an async runtime.
 pub fn resolve_dev_bench_port() -> anyhow::Result<DevBenchPort> {
     port::detect()
+}
+
+/// Every USB serial port the OS currently enumerates, unnarrowed — the list
+/// a human picks a [`Route::Direct`] signal's carrier from
+/// (`embarch-ui/design.md` §3 decision 10, behind Core's `GET /serial-ports`).
+///
+/// Deliberately *not* [`resolve_dev_bench_port`] with the gate off; see
+/// [`port::enumerate`] for why a wire's carrier cannot be VID-gated the way
+/// a recognized device's link is. Blocking — call via `spawn_blocking`.
+pub fn list_serial_ports() -> anyhow::Result<Vec<DetectedPort>> {
+    port::enumerate()
 }
 
 /// `POST /probes/enroll`'s implementation: records a probe's live hardware

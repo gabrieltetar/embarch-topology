@@ -380,6 +380,52 @@ pub fn detect() -> Result<DevBenchPort> {
     select(&ports, &filter)
 }
 
+/// What [`enumerate`] reports as a port's provenance: nothing narrowed it,
+/// the OS simply listed it. Deliberately not one of
+/// [`detected_by_for_vid`]'s answers — those name the rule that *selected* a
+/// port, and an unfiltered listing applied no rule at all.
+pub const ENUMERATED: &str = "enumerated";
+
+/// Every serial port the OS currently enumerates that reports a USB
+/// identity, with no VID gate and no narrowing — the list a human picks from
+/// when declaring a [`Route::Direct`](super::signal::Route::Direct) signal's
+/// carrier (`embarch-ui/design.md` §3 decision 10).
+///
+/// **Not [`select`], and not a superset of it.** `select` answers "which port
+/// is dev-bench's link", applying the VID gate and every narrowing rule.
+/// This answers "what is plugged in", because a `Direct` route's USB-UART
+/// bridge is a wire's carrier rather than a recognized device and can carry
+/// any VID at all — gating this list by the three link VIDs would hide
+/// exactly the port the route exists to name.
+///
+/// **Ports with no USB identity are omitted, and that is not a gap.** A
+/// `Direct` route is declared by `port_serial` and resolved through
+/// [`Filter::for_declared_serial`], so a port that reports no USB serial can
+/// never be declared as one; listing it would offer a choice nothing could
+/// act on.
+///
+/// Blocking, same as [`detect`] — call via `spawn_blocking` on an async
+/// runtime.
+pub fn enumerate() -> Result<Vec<DetectedPort>> {
+    let ports = serialport::available_ports().context("failed to enumerate serial ports")?;
+    Ok(enumerate_in(&ports))
+}
+
+/// [`enumerate`]'s pure half, split out for the same reason [`select`] is:
+/// the shape of the answer is testable with no hardware attached.
+pub fn enumerate_in(ports: &[SerialPortInfo]) -> Vec<DetectedPort> {
+    let mut out: Vec<DetectedPort> = ports
+        .iter()
+        .filter_map(as_candidate)
+        .map(|mut p| {
+            p.detected_by = ENUMERATED;
+            p
+        })
+        .collect();
+    out.sort_by(|a, b| a.port_name.cmp(&b.port_name));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -593,5 +639,38 @@ mod tests {
         let found = select(&ports, &default_filter()).unwrap();
         assert_eq!(found.port_name, "COM13");
         assert_eq!(found.detected_by, "silabs-vid-match");
+    }
+
+    /// The whole point of `enumerate`: a bridge with a VID none of the three
+    /// link constants name is still offered, because a `Route::Direct` wire's
+    /// carrier is not a device this crate recognizes.
+    #[test]
+    fn enumerate_offers_every_usb_port_whatever_its_vid() {
+        let ports = vec![
+            usb("COM13", SILABS_VID, Some("CP210x"), Some("AAA"), Some(0)),
+            usb("COM3", 0x0403, Some("FT232R USB UART"), Some("FTBBB"), None),
+            SerialPortInfo { port_name: "COM1".to_string(), port_type: SerialPortType::Unknown },
+        ];
+        let listed = enumerate_in(&ports);
+        let names: Vec<&str> = listed.iter().map(|p| p.port_name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["COM13", "COM3"],
+            "an unrecognized-VID bridge must be offered, and a port with no USB identity must not"
+        );
+        assert!(listed.iter().all(|p| p.detected_by == ENUMERATED));
+    }
+
+    /// `select` and `enumerate` answer different questions, and this pins
+    /// that they do: the same port list narrows to one dev-bench link and
+    /// lists two candidates for a human to pick a wire's carrier from.
+    #[test]
+    fn enumerate_is_not_select_with_the_gate_off() {
+        let ports = vec![
+            usb("COM13", SILABS_VID, Some("CP210x"), Some("AAA"), Some(0)),
+            usb("COM3", 0x0403, Some("FT232R USB UART"), Some("FTBBB"), None),
+        ];
+        assert_eq!(select(&ports, &default_filter()).unwrap().port_name, "COM13");
+        assert_eq!(enumerate_in(&ports).len(), 2);
     }
 }
