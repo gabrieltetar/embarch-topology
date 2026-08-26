@@ -8,7 +8,7 @@
 
 mod alert;
 mod enrollment;
-mod hardware_id;
+pub mod hardware_id;
 mod paths;
 mod port;
 pub mod signal;
@@ -16,6 +16,7 @@ mod validate;
 
 pub use alert::{Alert, UI_HOST, UI_PORT};
 pub use enrollment::EnrolledBoard;
+pub use hardware_id::{compare_self_reported, SelfReportedIdentity};
 pub use paths::{alert_log_path, data_dir, enrollment_path};
 pub use port::{DetectedPort, DevBenchPort, NotFound as DevBenchNotFound, DEV_BENCH_ROLE};
 pub use signal::{

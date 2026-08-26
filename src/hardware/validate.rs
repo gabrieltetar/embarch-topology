@@ -13,18 +13,31 @@
 //! 2026-08-25 (design.md §3 decision 19) — `embarch-ui` polls the same log
 //! through `embarch-core`'s `GET /alerts` instead.
 //!
-//! **What this does not close** (design.md §3 decision 8's own "real gap"
-//! note, and §5's open question): confirming the enrolled JTAG-capable probe
-//! is still attached and matches proves the *debug connection* to a role's
-//! chip is genuine. It does not, on its own, prove that some other
-//! currently-detected link (`super::port::detect`'s dev-bench serial port,
-//! say) is wired to that *same physical chip* rather than a different board
-//! that happens to share the role's VID heuristic — that would need the
-//! link's own protocol to carry a hardware ID (a firmware-level change,
-//! outside what this crate can add on its own). `validate_role` here is the
-//! strongest check achievable without that: it re-verifies the enrolled
-//! debug connection every time, which is what `embarch-core`'s dev-bench
-//! handshake already calls before ever opening the link.
+//! **What this does not close on its own** (design.md §3 decision 8's own
+//! "real gap" note, and §5's open question): confirming the enrolled
+//! JTAG-capable probe is still attached and matches proves the *debug
+//! connection* to a role's chip is genuine. It does not, by itself, prove
+//! that some other currently-detected link (`super::port::detect`'s
+//! dev-bench serial port, say) is wired to that *same physical chip* rather
+//! than a different board that happens to share the role's VID heuristic.
+//!
+//! **That gap is closed as of 2026-08-25, and this comment used to say it
+//! could not be.** It said the fix "would need the link's own protocol to
+//! carry a hardware ID (a firmware-level change, outside what this crate can
+//! add on its own)" — the first half was exactly right and the second half
+//! was the wrong conclusion to draw from it. `embarch-study-designer`'s
+//! `HelloAck` now carries dev-bench's self-reported chip ID
+//! (`embarch-core/design.md` §3 decision 35), and this crate supplies the
+//! piece that makes it usable: [`super::compare_self_reported`], which is
+//! chip knowledge and therefore belongs here rather than in Core. A
+//! firmware protocol change being outside this crate's reach never meant the
+//! *comparison* was.
+//!
+//! `validate_role` itself is unchanged, and still the strongest check
+//! available at the moment it runs — it re-verifies the enrolled debug
+//! connection every time, which is what `embarch-core`'s dev-bench handshake
+//! calls before ever opening the link. What is new is that the handshake now
+//! also checks the *other* end against what this returned.
 
 use anyhow::{Context, Result};
 use probe_rs::probe::list::Lister;
