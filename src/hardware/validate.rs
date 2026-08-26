@@ -7,9 +7,11 @@
 //!
 //! Fails closed in every branch — an unenrolled or now-mismatched probe
 //! blocks the operation entirely, never a guess. Every mismatch is durably
-//! logged and live-pushed (`alert.rs`) before the structured error is even
-//! constructed, so the record exists regardless of what the caller does
-//! with the `Err` it gets back.
+//! logged (`alert.rs`) before the structured error is even constructed, so
+//! the record exists regardless of what the caller does with the `Err` it
+//! gets back. The live push that used to accompany that log was retired
+//! 2026-08-25 (design.md §3 decision 19) — `embarch-ui` polls the same log
+//! through `embarch-core`'s `GET /alerts` instead.
 //!
 //! **What this does not close** (design.md §3 decision 8's own "real gap"
 //! note, and §5's open question): confirming the enrolled JTAG-capable probe
@@ -134,8 +136,6 @@ fn raise(known: &EnrolledBoard, live_hardware_id: Option<String>, reason: String
         // — surface both, but still return the mismatch as the actual error.
         tracing::error!("failed to durably log a topology mismatch: {e:?}");
     }
-    alert::push_live(&alert);
-
     anyhow::Error::new(TopologyMismatch {
         role: known.role.clone(),
         probe_serial: known.probe_serial.clone(),
@@ -143,7 +143,7 @@ fn raise(known: &EnrolledBoard, live_hardware_id: Option<String>, reason: String
         recorded_hardware_id: known.hardware_id.clone(),
         live_hardware_id,
         reason,
-        fix_it_url: alert::fix_it_url(&alert.id),
+        fix_it_url: alert::fix_it_url(),
     })
 }
 

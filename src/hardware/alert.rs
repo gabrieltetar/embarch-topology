@@ -1,51 +1,45 @@
-//! The durable alert log + live event push behind [`super::validate`]
-//! (design.md §3 decision 12): every mismatch [`super::validate`] catches is
-//! (a) appended to a local, durable JSON-lines log the instant it happens —
-//! nothing lost to bad timing between the check and someone looking — and
-//! (b) pushed live to `embarch-topology`'s own UI process, *if* one happens
-//! to be running on this machine right now.
+//! The durable alert log behind [`super::validate`] (design.md §3 decision
+//! 12): every mismatch [`super::validate`] catches is appended to a local,
+//! durable JSON-lines log the instant it happens — nothing lost to bad
+//! timing between the check and someone looking.
 //!
-//! **How the live push actually crosses the process boundary.** `validate()`
-//! typically runs inside `embarch-core` (or `embarch-topology`'s own CLI) —
-//! a different OS process than the UI server, so an in-process
-//! `tokio::sync::broadcast` channel alone can't carry an event from one to
-//! the other. The fix: when `embarch-topology`'s UI starts, it writes its
-//! own loopback address to [`paths::ui_marker_path`] (a plain
-//! `127.0.0.1:PORT` text file); `push_live` here reads that file and, if
-//! present, fires a tiny best-effort HTTP POST to the UI's own
-//! `/_internal/alert` endpoint (see `bin/ui.rs`), which is what actually
-//! feeds the UI's in-process `broadcast` channel that a connected browser
-//! tab's SSE stream reads from. No queue, no retry, no dependency on the UI
-//! being up — a missing/stale marker file, or a POST that fails outright,
-//! just means nothing happened live; the durable log entry this always
-//! writes first is the fallback (design.md §3 decision 12: "the durable
-//! record and the live view are two ends of one alert, not separate
-//! mechanisms").
+//! **The live-push half is gone (design.md §3 decision 19, 2026-08-25).**
+//! Decision 12 paired that durable log with a same-machine loopback push:
+//! `embarch-topology`'s own UI (`bin/ui.rs`) wrote its bound address to a
+//! `ui.addr` marker file, and `push_live` here read it back and fired a
+//! hand-rolled best-effort POST at the UI's `/_internal/alert` endpoint.
+//! That binary was deleted 2026-08-24 when [`embarch-ui`] replaced it, and
+//! nothing has written the marker since — so `push_live` degraded to a
+//! permanent silent no-op and `fix_it_url` to a permanently dead port. Both
+//! were *working exactly as designed*, which is precisely what made them
+//! worth deleting rather than leaving: code that looks live and is not.
 //!
-//! The POST is hand-rolled over a raw `TcpStream` rather than pulling in an
-//! async HTTP client for a call this narrow (loopback, one hop, a few dozen
-//! bytes of JSON, best-effort) — `reqwest` is already a dependency for
-//! [`crate::software`]'s real Core-reachability probing, but that's a
-//! meaningfully different job (arbitrary hosts, redirects, TLS) from "POST
-//! to a socket address I just read from a file on this same machine."
+//! What replaces it is not a new mechanism but an existing one: `embarch-ui`
+//! polls `embarch-core`'s `GET /alerts` every five seconds, which reads this
+//! same durable log. [`fix_it_url`] is now a fixed URL into that UI's
+//! Topology tab — no marker, no discovery, nothing to go stale.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::io::{Read, Write};
-use std::net::TcpStream;
-use std::time::Duration;
+use std::io::Write;
 
 use super::enrollment::EnrolledBoard;
 use super::paths;
 
-/// The port `embarch-topology`'s UI binds by default (`bin/ui.rs`) — also
-/// what a [`TopologyMismatch`](super::validate::TopologyMismatch)'s
-/// `fix_it_url` points at when no UI happens to be running right now (in
-/// which case opening the URL is what starts one, on this same port, that
-/// then loads the same alert straight out of the durable log).
-pub const DEFAULT_UI_PORT: u16 = 4886;
-
-const PUSH_TIMEOUT: Duration = Duration::from_millis(300);
+/// Where `embarch-ui` binds by default (`embarch-ui`'s own `BIND_ADDR`/
+/// `BIND_PORT`) — the destination [`fix_it_url`] names.
+///
+/// **Duplicated constants, deliberately, and the honest limit that comes
+/// with it** (design.md §3 decision 19): this crate does not depend on
+/// `embarch-ui` and must not, so these are copies. `embarch-ui` lets a
+/// human override its bind address with `EMBARCH_UI_HOST`/`EMBARCH_UI_PORT`,
+/// and reading those here would be worse than useless — they would be read
+/// in *this* process (usually `embarch-core`'s), which has no reason to have
+/// them set and no way to know what the UI process was started with. A
+/// fixed, occasionally-wrong URL beats a discovery mechanism that goes
+/// stale, which is the whole of decision 19.
+pub const UI_HOST: &str = "127.0.0.1";
+pub const UI_PORT: u16 = 4890;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Alert {
@@ -78,8 +72,8 @@ impl Alert {
     }
 }
 
-/// Append one alert to the durable log, unconditionally — called before
-/// [`push_live`] on every path, never the other way around.
+/// Append one alert to the durable log, unconditionally — the only thing
+/// that happens to an alert now that decision 19 retired the live push.
 pub fn record(alert: &Alert) -> Result<()> {
     let path = paths::alert_log_path()?;
     if let Some(parent) = path.parent() {
@@ -123,51 +117,22 @@ pub fn recent(limit: usize) -> Result<Vec<Alert>> {
     Ok(all)
 }
 
-/// Best-effort: if `embarch-topology`'s UI is running on this machine (per
-/// [`paths::ui_marker_path`]), push this alert to it live. Never fails
-/// loudly — the durable [`record`] call is what actually matters; this is
-/// strictly additive.
-pub fn push_live(alert: &Alert) {
-    if let Err(e) = try_push_live(alert) {
-        tracing::debug!("no live topology UI to push this alert to: {e:?}");
-    }
-}
-
-fn try_push_live(alert: &Alert) -> Result<()> {
-    let marker = paths::ui_marker_path()?;
-    let addr = std::fs::read_to_string(&marker)
-        .with_context(|| format!("no UI marker file at {}", marker.display()))?
-        .trim()
-        .to_string();
-
-    let body = serde_json::to_string(alert)?;
-    let request = format!(
-        "POST /_internal/alert HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    );
-
-    let mut stream = TcpStream::connect(&addr).context("connect to UI marker address")?;
-    stream.set_write_timeout(Some(PUSH_TIMEOUT)).ok();
-    stream.set_read_timeout(Some(PUSH_TIMEOUT)).ok();
-    stream.write_all(request.as_bytes()).context("write alert push request")?;
-    // Drain (and discard) whatever the UI sends back — just confirms the
-    // connection was accepted, not that the browser side is listening.
-    let mut buf = [0u8; 64];
-    let _ = stream.read(&mut buf);
-    Ok(())
-}
-
-/// Where opening (or focusing) `embarch-topology`'s UI lands for this alert
-/// — whether or not a UI happens to be running right now (design.md §3
-/// decision 12: opening/focusing the UI is the caller's job, never Core's).
-pub fn fix_it_url(alert_id: &str) -> String {
-    let port = paths::ui_marker_path()
-        .ok()
-        .and_then(|marker| std::fs::read_to_string(marker).ok())
-        .and_then(|addr| addr.trim().rsplit(':').next().map(str::to_string))
-        .and_then(|p| p.parse::<u16>().ok())
-        .unwrap_or(DEFAULT_UI_PORT);
-    format!("http://127.0.0.1:{port}/mismatch/{alert_id}")
+/// Where a human goes to act on this alert: `embarch-ui`'s Topology tab,
+/// which lists recent alerts straight out of the durable log this module
+/// writes (via `embarch-core`'s `GET /alerts`).
+///
+/// **Takes no alert id, and that is a narrowing, not an oversight**
+/// (design.md §3 decision 19). It used to be `fix_it_url(alert_id)`,
+/// pointing at a per-alert `/mismatch/{id}` detail page in the deleted
+/// `bin/ui.rs`. `embarch-ui` has no such page — its Topology tab shows the
+/// recent-alert list — so an id in the URL would be a parameter nothing on
+/// the other end reads. Better a link that lands where the alert actually
+/// is than one that looks more precise than it is.
+///
+/// Opening or focusing the UI is still the caller's job, never this crate's
+/// (decision 12) — this only says where.
+pub fn fix_it_url() -> String {
+    format!("http://{UI_HOST}:{UI_PORT}/#topology")
 }
 
 #[cfg(test)]
@@ -202,11 +167,11 @@ mod tests {
     }
 
     #[test]
-    fn fix_it_url_falls_back_to_the_default_port_with_no_marker_file() {
-        // No real marker file exists in this test environment (nothing has
-        // started a UI here), so this always exercises the fallback branch.
-        let url = fix_it_url("deadbeef-123");
-        assert!(url.starts_with("http://127.0.0.1:"));
-        assert!(url.ends_with("/mismatch/deadbeef-123"));
+    fn fix_it_url_is_a_fixed_embarch_ui_topology_tab_url() {
+        // Deterministic by construction: no marker file, no filesystem, no
+        // environment. The `#topology` fragment is load-bearing —
+        // `embarch-ui`'s `initNav` reads it to pick the tab, otherwise the
+        // link lands on whichever tab that browser last had open.
+        assert_eq!(fix_it_url(), "http://127.0.0.1:4890/#topology");
     }
 }

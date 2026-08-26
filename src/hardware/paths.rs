@@ -7,8 +7,7 @@
 //! open question: reuse the exact directory `known_boards.toml` already used
 //! (continuity — this *is* that file's replacement, decision 3), scoped under
 //! its own subdirectory so this crate's files (`enrollment.toml`,
-//! `alerts.jsonl`, the UI's own `ui.addr` marker) don't sit loose next to
-//! Core's `token`/`logs`.
+//! `alerts.jsonl`) don't sit loose next to Core's `token`/`logs`.
 
 use anyhow::Result;
 use std::path::PathBuf;
@@ -41,10 +40,11 @@ pub fn alert_log_path() -> Result<PathBuf> {
     Ok(data_dir()?.join("alerts.jsonl"))
 }
 
-/// Where the running `embarch-topology` UI (if any) records its own address,
-/// so a `validate()` call anywhere on the machine can find it and push a
-/// live event (design.md §3 decision 12) — see `crate::hardware::alert`'s
-/// own doc comment for the full mechanism this file is one half of.
-pub fn ui_marker_path() -> Result<PathBuf> {
-    Ok(data_dir()?.join("ui.addr"))
-}
+// `ui_marker_path()` (`<data_dir>/ui.addr`) lived here until 2026-08-25 —
+// the running UI's own bound address, written by `bin/ui.rs` so a
+// `validate()` call elsewhere on the machine could push it a live alert.
+// `bin/ui.rs` was deleted 2026-08-24 and `embarch-ui` never wrote the
+// marker, so nothing has produced this file since; retired with the rest of
+// the live-push mechanism (design.md §3 decision 19). Named here rather
+// than silently dropped because the file may still exist on a machine that
+// ran the old UI, and nothing reads it any more.

@@ -14,9 +14,9 @@ mod port;
 pub mod signal;
 mod validate;
 
-pub use alert::{Alert, DEFAULT_UI_PORT};
+pub use alert::{Alert, UI_HOST, UI_PORT};
 pub use enrollment::EnrolledBoard;
-pub use paths::{alert_log_path, data_dir, enrollment_path, ui_marker_path};
+pub use paths::{alert_log_path, data_dir, enrollment_path};
 pub use port::{DetectedPort, DevBenchPort, NotFound as DevBenchNotFound, DEV_BENCH_ROLE};
 pub use signal::{
     Route, SignalDirection, SignalLink, SignalMismatch, SignalNotDeclared,
