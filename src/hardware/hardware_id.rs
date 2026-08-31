@@ -103,19 +103,73 @@ pub fn compare_self_reported(chip: &str, jtag_read: &str, self_reported: &str) -
     if self_reported.eq_ignore_ascii_case(jtag_read) {
         return SelfReportedIdentity::Match;
     }
-    match chip {
-        "esp32c5" => match esp32c5_expected_self_report(jtag_read) {
-            Some(expected) if self_reported.eq_ignore_ascii_case(&expected) => {
-                SelfReportedIdentity::Match
-            }
-            Some(_) => SelfReportedIdentity::Mismatch,
-            // The JTAG string isn't the shape `read` produces, so there is
-            // nothing to project. Undeclared rather than Mismatch: the fault
-            // is on this side, and refusing a board over it would be wrong.
-            None => SelfReportedIdentity::Undeclared,
-        },
-        _ => SelfReportedIdentity::Undeclared,
+    let expected = match chip {
+        "esp32c5" => esp32c5_expected_self_report(jtag_read),
+        c if is_nordic_deviceid_chip(c) => nordic_expected_self_report(jtag_read),
+        _ => return SelfReportedIdentity::Undeclared,
+    };
+    match expected {
+        Some(expected) if self_reported.eq_ignore_ascii_case(&expected) => {
+            SelfReportedIdentity::Match
+        }
+        Some(_) => SelfReportedIdentity::Mismatch,
+        // The JTAG string isn't the shape `read` produces, so there is
+        // nothing to project. Undeclared rather than Mismatch: the fault
+        // is on this side, and refusing a board over it would be wrong.
+        None => SelfReportedIdentity::Undeclared,
     }
+}
+
+/// The Nordic chips whose [`read`] arm goes to a `DEVICEID` pair — the exact
+/// set for which [`nordic_expected_self_report`]'s derivation holds. Kept as
+/// its own predicate rather than folded into the match so it stays visibly
+/// the *same* set `read` handles: a chip added there without being added
+/// here degrades to `Undeclared`, which is safe, and the reverse would
+/// silently compare against a projection of a string `read` never produced.
+fn is_nordic_deviceid_chip(chip: &str) -> bool {
+    matches!(chip, "nRF54L15" | "nRF54L10" | "nRF54L05" | "nRF54LM20A")
+        || chip.starts_with("nRF5")
+        || chip.starts_with("nRF9")
+}
+
+/// Projects a JTAG-read Nordic ID (`{deviceid0:08x}{deviceid1:08x}`, as
+/// [`read`] produces for both the classic `FICR.DEVICEID` and the nRF54L
+/// `FICR.INFO.DEVICEID` arms) into the string a board running Zephyr reports
+/// for itself: **the same 16 hex digits with their two halves swapped.**
+///
+/// Derived from `zephyr/drivers/hwinfo/hwinfo_nrf.c`, not from observation —
+/// the standard [`compare_self_reported`] sets. That driver reads the pair in
+/// index order and then deliberately emits it reversed:
+///
+/// ```text
+/// buf[0] = nrf_ficr_deviceid_get(NRF_FICR, 0);
+/// buf[1] = nrf_ficr_deviceid_get(NRF_FICR, 1);
+/// dev_id.id[0] = sys_cpu_to_be32(buf[1]);   /* DEVICEID[1] first  */
+/// dev_id.id[1] = sys_cpu_to_be32(buf[0]);   /* DEVICEID[0] second */
+/// ```
+///
+/// `sys_cpu_to_be32` then `memcpy` is a big-endian byte emission, and
+/// `{:08x}` is big-endian nibble order, so each half hex-encodes identically
+/// on both sides and only their *order* differs. One `#if` branch covers
+/// both `NRF_FICR_HAS_DEVICE_ID` and `NRF_FICR_HAS_INFO_DEVICE_ID`, which is
+/// why one relation serves the classic parts and the nRF54L series alike.
+///
+/// **The limit, stated rather than left implicit:** that file has `#elif`
+/// branches falling back to `DEVICEADDR` or the NFC tag header on parts where
+/// `DEVICEID` is inaccessible, and those produce something this projection
+/// does not describe at all. Every chip [`read`] currently handles takes the
+/// `DEVICEID` branch — but a part that did not would come back `Mismatch`
+/// here, not `Undeclared`, which is the one way this arm can be wrong. It is
+/// the same exposure the `esp32c5` arm carries and is accepted on the same
+/// terms: the alternative is refusing to check anything.
+///
+/// Confirmed live 2026-08-31 on the nRF54L15DK dev bench — JTAG
+/// `6fcddc36cb781b71`, self-reported `cb781b716fcddc36`.
+fn nordic_expected_self_report(jtag_read: &str) -> Option<String> {
+    if jtag_read.len() != 16 || !jtag_read.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(format!("{}{}", &jtag_read[8..], &jtag_read[..8]))
 }
 
 /// Projects a JTAG-read `esp32c5` ID (`{sys0:08x}{sys1:08x}`, as [`read`]
@@ -165,6 +219,47 @@ mod tests {
         assert_eq!(
             compare_self_reported("esp32c5", "aaaaaaaabbbbbbbb", "AAAAAAAABBBBBBBB"),
             SelfReportedIdentity::Match
+        );
+    }
+
+    /// The real pair, read off the nRF54L15DK dev bench on 2026-08-31 — the
+    /// first time this comparison ever ran against Nordic silicon, and the
+    /// run that reported `undeclared` because no arm existed.
+    #[test]
+    fn the_real_nrf54l15_dev_bench_pair_matches() {
+        assert_eq!(
+            compare_self_reported("nRF54L15", "6fcddc36cb781b71", "cb781b716fcddc36"),
+            SelfReportedIdentity::Match
+        );
+        // The DUT on the same bench is also an nRF54L15, so the arm has to
+        // still be able to tell two boards of the same chip apart — which is
+        // the entire point of the gate.
+        assert_eq!(
+            compare_self_reported("nRF54L15", "834f2559f10a6cdf", "cb781b716fcddc36"),
+            SelfReportedIdentity::Mismatch
+        );
+    }
+
+    /// The relation is the same one for the classic parts, because
+    /// `hwinfo_nrf.c` serves both families from a single `#if` branch.
+    #[test]
+    fn the_nordic_relation_covers_the_classic_families_too() {
+        for chip in ["nRF52840", "nRF9160", "nRF54L10", "nRF54LM20A"] {
+            assert_eq!(
+                compare_self_reported(chip, "aabbccdd11223344", "11223344aabbccdd"),
+                SelfReportedIdentity::Match,
+                "{chip}"
+            );
+        }
+    }
+
+    /// A chip with no declared relation still gets `Undeclared`, and that is
+    /// not a pass — the property the new arm must not have weakened.
+    #[test]
+    fn an_unrelated_chip_is_still_undeclared_not_a_pass() {
+        assert_eq!(
+            compare_self_reported("stm32f446xx", "aabbccdd11223344", "11223344aabbccdd"),
+            SelfReportedIdentity::Undeclared
         );
     }
 
