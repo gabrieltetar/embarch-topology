@@ -41,6 +41,28 @@ pub struct EnrolledBoard {
     /// this over its old JTAG-probe-serial fallback when set.
     #[serde(default)]
     pub link_port_serial: Option<String>,
+    /// Which USB interface of that device carries the link, when the serial
+    /// alone cannot say — a debug probe that exposes **two** VCOM ports
+    /// shares one USB serial across both, so [`link_port_serial`] and the
+    /// `probe_serial` fallback both narrow to a *pair*, not to a port.
+    ///
+    /// **Real, and it cost a debugging cycle to find (2026-08-31).** The
+    /// nRF54L15DK's onboard J-Link OB enumerates VCOM0 and VCOM1 as
+    /// interfaces 0 and 2 of one composite device.
+    /// [`super::port::select`] used to resolve that pair by taking the
+    /// lowest interface index and logging a warning — a rule with no
+    /// hardware evidence behind it, since no bench had ever had two VCOMs
+    /// before. On this DK it is simply wrong: Zephyr's `zephyr,console` for
+    /// this board is `uart20`, whose pins (P1.04/P1.05) are wired to
+    /// **VCOM1**, interface 2. The result was a bench that flashed, booted,
+    /// ran, and answered nothing, while Core reported a clean detection of
+    /// the silent port.
+    ///
+    /// Undeclared, the old lowest-interface guess still applies — a bench
+    /// with a single VCOM (every one before this DK) needs nothing here.
+    /// Declared, it narrows hard, same posture as [`link_port_serial`].
+    #[serde(default)]
+    pub link_port_interface: Option<u8>,
 }
 
 /// `enrollment.toml`'s whole contents: the enrolled-board table this file
@@ -126,12 +148,50 @@ pub fn list() -> Result<Vec<EnrolledBoard>> {
 /// Insert or replace the entry for `board.probe_serial` — enrollment is
 /// idempotent, re-enrolling the same probe overwrites its old row rather
 /// than accumulating stale duplicates that could disagree with each other.
-pub fn upsert(board: EnrolledBoard) -> Result<()> {
-    let path = paths::enrollment_path()?;
-    let mut store = load_at(&path)?;
-    store.boards.retain(|b| b.probe_serial != board.probe_serial);
+///
+/// **A `role` is also unique, and that took until 2026-08-31 to enforce.**
+/// This function only ever de-duplicated on `probe_serial`, so moving a role
+/// to *different silicon* — the dev-bench going from an nRF54L15DK to an
+/// ESP32-C5 and back — left two rows both claiming `role = "dev-bench"`.
+/// Nothing errored, and nothing looked wrong in the file. What broke is
+/// downstream: [`find_by_role`] documents itself as returning the first
+/// match by file order, so every role-keyed consumer — `validate`'s identity
+/// gate, [`port::Filter::resolve`](super::port::Filter::resolve)'s serial
+/// fallback, `POST /validate` — would keep answering with the *unplugged*
+/// board, and the newly enrolled one would be unreachable by the only name
+/// anything addresses it by. On this bench that presented as the new
+/// dev-bench inheriting the old one's `link_port_serial`, a UART bridge that
+/// was no longer attached to anything, which hard-narrows detection to a
+/// port that cannot exist.
+///
+/// So a same-`role`/different-`probe_serial` row is displaced too, and
+/// returned rather than dropped silently: replacing one board with another
+/// under the same name is exactly the kind of thing a caller should be able
+/// to say out loud. `Ok(None)` means nothing was displaced.
+pub fn upsert(board: EnrolledBoard) -> Result<Option<EnrolledBoard>> {
+    upsert_at(&paths::enrollment_path()?, board)
+}
+
+/// [`upsert`]'s whole body, against an explicit path. Split out so the
+/// role-uniqueness rule above is testable for real rather than
+/// re-implemented in a test against a temp file — the shape three tests in
+/// this module were already in, and precisely why nobody noticed the rule
+/// was missing.
+fn upsert_at(path: &Path, board: EnrolledBoard) -> Result<Option<EnrolledBoard>> {
+    let mut store = load_at(path)?;
+
+    let displaced = store
+        .boards
+        .iter()
+        .find(|b| b.role == board.role && b.probe_serial != board.probe_serial)
+        .cloned();
+
+    store
+        .boards
+        .retain(|b| b.probe_serial != board.probe_serial && b.role != board.role);
     store.boards.push(board);
-    save_at(&path, &store)
+    save_at(path, &store)?;
+    Ok(displaced)
 }
 
 /// Declares `role`'s runtime-link USB serial (`EnrolledBoard::link_port_serial`'s
@@ -143,6 +203,20 @@ pub fn upsert(board: EnrolledBoard) -> Result<()> {
 /// `chip`/`hardware_id` on record for whatever role this link serial gets
 /// attached to.
 pub fn set_link_port_serial(role: &str, serial: &str) -> Result<()> {
+    amend(role, |board| board.link_port_serial = Some(serial.to_string()))
+}
+
+/// Declares which USB interface of `role`'s link device actually carries the
+/// link ([`EnrolledBoard::link_port_interface`]'s own doc comment for the
+/// nRF54L15DK case that forced this). Same contract as
+/// [`set_link_port_serial`]: `role` must already be enrolled, and this only
+/// ever amends that row.
+pub fn set_link_port_interface(role: &str, interface: u8) -> Result<()> {
+    amend(role, |board| board.link_port_interface = Some(interface))
+}
+
+/// The shared body of the two `set_link_port_*` functions above.
+fn amend(role: &str, f: impl FnOnce(&mut EnrolledBoard)) -> Result<()> {
     let path = paths::enrollment_path()?;
     let mut store = load_at(&path)?;
     let board = store
@@ -150,7 +224,7 @@ pub fn set_link_port_serial(role: &str, serial: &str) -> Result<()> {
         .iter_mut()
         .find(|b| b.role == role)
         .with_context(|| format!("no board enrolled as role '{role}' yet; enroll it first"))?;
-    board.link_port_serial = Some(serial.to_string());
+    f(board);
     save_at(&path, &store)
 }
 
@@ -171,6 +245,7 @@ mod tests {
             hardware_id: "deadbeefcafef00d".to_string(),
             confirmed_at_utc_ms: 1_755_000_000_000,
             link_port_serial: None,
+            link_port_interface: None,
         }
     }
 
@@ -213,6 +288,68 @@ mod tests {
 
         let missing = load_at(&path).unwrap().boards.into_iter().find(|b| b.role == "no-such-role");
         assert_eq!(missing, None);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The real bug, pinned against the real function: moving a role onto
+    /// different silicon must leave exactly one row holding that role, and
+    /// must say which board it displaced.
+    #[test]
+    fn upsert_moves_a_role_to_a_new_probe_and_reports_the_displaced_board() {
+        let dir = temp_path("role-move-dir");
+        let path = dir.join("enrollment.toml");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // The bench as it stood: an ESP32-C5 dev-bench with a declared link
+        // port on a separate UART bridge, plus an unrelated DUT.
+        let mut old_bench = sample("D0:CF:13:ED:F9:30");
+        old_bench.role = "dev-bench".to_string();
+        old_bench.chip = "esp32c5".to_string();
+        old_bench.link_port_serial = Some("D607104BD96EF0119D5C489B1045C30F".to_string());
+        let dut = sample("000852006107");
+        save_at(&path, &Store { boards: vec![old_bench.clone(), dut.clone()], signals: Vec::new() })
+            .unwrap();
+
+        let mut new_bench = sample("001057729826");
+        new_bench.role = "dev-bench".to_string();
+        new_bench.chip = "nRF54L15".to_string();
+
+        let displaced = upsert_at(&path, new_bench.clone()).unwrap();
+        assert_eq!(displaced, Some(old_bench));
+
+        let boards = load_at(&path).unwrap().boards;
+        assert_eq!(
+            boards.iter().filter(|b| b.role == "dev-bench").count(),
+            1,
+            "a role must be held by exactly one board"
+        );
+        let bench = boards.iter().find(|b| b.role == "dev-bench").unwrap();
+        assert_eq!(bench.probe_serial, "001057729826");
+        assert_eq!(
+            bench.link_port_serial, None,
+            "the displaced board's link port must not be inherited by different hardware"
+        );
+        assert!(
+            boards.iter().any(|b| b.probe_serial == dut.probe_serial),
+            "an unrelated role must be left alone"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Re-enrolling the *same* probe under the same role displaces nothing —
+    /// the ordinary idempotent case must not report a phantom replacement.
+    #[test]
+    fn upsert_of_the_same_probe_displaces_nothing() {
+        let dir = temp_path("same-probe-dir");
+        let path = dir.join("enrollment.toml");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let board = sample("001057729826");
+        assert_eq!(upsert_at(&path, board.clone()).unwrap(), None);
+        assert_eq!(upsert_at(&path, board).unwrap(), None);
+        assert_eq!(load_at(&path).unwrap().boards.len(), 1);
 
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -60,9 +60,18 @@ enum Command {
     /// apart from some other SEGGER-VID device on the same bench (e.g. a
     /// DUT's own J-Link). dev-bench must already be enrolled via `enroll
     /// --role dev-bench` first.
+    ///
+    /// `--interface` answers a different question from `--serial`, and a
+    /// two-VCOM probe needs it: both of that probe's ports report the *same*
+    /// USB serial, so no serial can tell them apart. The nRF54L15DK is
+    /// exactly that case — its `zephyr,console` (`uart20`) is VCOM1,
+    /// interface 2, while detection's fallback guess is the lowest interface.
+    /// Either flag may be given alone.
     SetDevBenchLink {
         #[arg(long)]
-        serial: String,
+        serial: Option<String>,
+        #[arg(long)]
+        interface: Option<u8>,
     },
     /// Print the most recent topology-mismatch alerts from the durable log.
     Alerts {
@@ -98,10 +107,13 @@ fn main() -> anyhow::Result<()> {
         Command::List => {
             for b in hardware::list_enrolled()? {
                 print!("{}: probe {} chip {} hardware_id {}", b.role, b.probe_serial, b.chip, b.hardware_id);
-                match &b.link_port_serial {
-                    Some(s) => println!(" link_port_serial {s}"),
-                    None => println!(),
+                if let Some(s) = &b.link_port_serial {
+                    print!(" link_port_serial {s}");
                 }
+                if let Some(i) = b.link_port_interface {
+                    print!(" link_port_interface {i}");
+                }
+                println!();
             }
         }
         Command::Enroll { role, chip, probe_serial } => {
@@ -122,9 +134,18 @@ fn main() -> anyhow::Result<()> {
                 std::process::exit(1);
             }
         },
-        Command::SetDevBenchLink { serial } => {
-            hardware::set_dev_bench_link_port_serial(&serial)?;
-            println!("dev-bench link port serial set to '{serial}'");
+        Command::SetDevBenchLink { serial, interface } => {
+            if serial.is_none() && interface.is_none() {
+                anyhow::bail!("set-dev-bench-link needs at least one of --serial or --interface");
+            }
+            if let Some(serial) = &serial {
+                hardware::set_dev_bench_link_port_serial(serial)?;
+                println!("dev-bench link port serial set to '{serial}'");
+            }
+            if let Some(interface) = interface {
+                hardware::set_dev_bench_link_port_interface(interface)?;
+                println!("dev-bench link port interface set to {interface}");
+            }
         }
         Command::Alerts { limit } => {
             for a in hardware::recent_alerts(limit)? {

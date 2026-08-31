@@ -323,10 +323,14 @@ pub fn enroll(role: &str, chip: &str, probe_serial: Option<&str>) -> Result<Enro
 
     // Re-enrolling under the same probe_serial replaces the whole row
     // (`enrollment::upsert`'s own doc comment) — carry over any
-    // already-declared `link_port_serial` rather than silently dropping it,
-    // since it's an independent fact this call has nothing to say about.
-    let link_port_serial =
-        enrollment::find(&serial).ok().flatten().and_then(|b| b.link_port_serial);
+    // already-declared link-port facts rather than silently dropping them,
+    // since they're independent facts this call has nothing to say about.
+    // Keyed on the *probe serial*, deliberately: a role moving to different
+    // silicon must NOT inherit them, because they describe the old board's
+    // physical USB link and nothing about the new one.
+    let prior = enrollment::find(&serial).ok().flatten();
+    let link_port_serial = prior.as_ref().and_then(|b| b.link_port_serial.clone());
+    let link_port_interface = prior.and_then(|b| b.link_port_interface);
 
     let board = EnrolledBoard {
         probe_serial: serial,
@@ -335,7 +339,26 @@ pub fn enroll(role: &str, chip: &str, probe_serial: Option<&str>) -> Result<Enro
         hardware_id,
         confirmed_at_utc_ms: enrollment::now_utc_ms(),
         link_port_serial,
+        link_port_interface,
     };
-    enrollment::upsert(board.clone())?;
+    // A role is unique (`enrollment::upsert`'s own doc comment). Moving one
+    // onto different silicon is a legitimate thing to do — this bench's
+    // dev-bench role has now been an nRF54L15DK, an ESP32-C5, and an
+    // nRF54L15DK again — but it is never a thing to do *quietly*: the board
+    // that just lost the role is no longer reachable by the only name
+    // anything in this suite addresses it by.
+    if let Some(displaced) = enrollment::upsert(board.clone())? {
+        tracing::warn!(
+            "role '{}' moved from probe {} (chip {}, hardware_id {}) to probe {} (chip {}, \
+             hardware_id {}); the old board is no longer enrolled under any role",
+            board.role,
+            displaced.probe_serial,
+            displaced.chip,
+            displaced.hardware_id,
+            board.probe_serial,
+            board.chip,
+            board.hardware_id,
+        );
+    }
     Ok(board)
 }

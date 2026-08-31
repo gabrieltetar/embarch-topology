@@ -85,6 +85,20 @@ pub struct DetectedPort {
     pub serial_number: Option<String>,
     pub product: Option<String>,
     pub interface: Option<u8>,
+    /// How many equally-plausible ports this one was **guessed** from, when
+    /// nothing declared could narrow them — `None` when the answer was
+    /// actually determined rather than picked.
+    ///
+    /// This exists because the guess used to be invisible: [`select`] logged
+    /// a `WARN` and returned a port that looked exactly like a confident
+    /// answer, and `GET /dev-bench/port` reported it as one. On the
+    /// nRF54L15DK the guess is wrong (its console UART is on the *higher*
+    /// interface), and the resulting failure — a bench that flashes, boots
+    /// and answers nothing — says nothing about a port having been chosen at
+    /// all. A caller that can see this field can say "COM16, guessed among
+    /// 2" instead of "COM16".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub guessed_among: Option<usize>,
 }
 
 /// What every existing caller (`embarch-core`, this crate's own CLI) calls
@@ -192,18 +206,22 @@ impl Filter {
     /// case for dev-bench hardware whose link and JTAG probe really are the
     /// same physical device, where the old inference already works.
     pub fn resolve() -> Result<Self> {
-        let (serial, serial_is_fallback) = match enrollment::find_by_role(DEV_BENCH_ROLE) {
-            Ok(Some(board)) => match board.link_port_serial {
-                Some(link_serial) => (Some(link_serial), false),
-                None => (Some(board.probe_serial), true),
-            },
-            Ok(None) => (None, true),
+        let (serial, serial_is_fallback, interface) = match enrollment::find_by_role(DEV_BENCH_ROLE)
+        {
+            Ok(Some(board)) => {
+                let interface = board.link_port_interface;
+                match board.link_port_serial {
+                    Some(link_serial) => (Some(link_serial), false, interface),
+                    None => (Some(board.probe_serial), true, interface),
+                }
+            }
+            Ok(None) => (None, true, None),
             Err(e) => {
                 tracing::warn!(
                     "failed to read enrollment while resolving dev-bench's serial fallback, \
                      continuing without it: {e:?}"
                 );
-                (None, true)
+                (None, true, None)
             }
         };
 
@@ -212,7 +230,10 @@ impl Filter {
             product_needle: Some(DEFAULT_PRODUCT_NEEDLE.to_string()),
             product_needle_is_default: true,
             serial_is_fallback,
-            interface: None,
+            // `EnrolledBoard::link_port_interface`, the second declared fact
+            // a two-VCOM probe needs — see [`select`]'s multi-candidate
+            // branch for what happens without one.
+            interface,
             no_vid_gate: false,
         })
     }
@@ -256,6 +277,7 @@ fn as_candidate(info: &SerialPortInfo) -> Option<DetectedPort> {
         serial_number: usb.serial_number.clone(),
         product: usb.product.clone(),
         interface: usb.interface,
+        guessed_among: None,
     })
 }
 
@@ -331,13 +353,29 @@ pub fn select(ports: &[SerialPortInfo], filter: &Filter) -> Result<DetectedPort>
             );
         }
 
+        // **A guess, and it has been wrong on real hardware.** One probe
+        // exposing several VCOMs shares a serial across all of them, so
+        // neither the enrolled probe serial nor a declared
+        // `link_port_serial` can narrow them — the only thing left is the
+        // interface index, and until 2026-08-31 nothing could declare one,
+        // so this took the lowest. That rule had no evidence behind it (no
+        // bench before the nRF54L15DK had two VCOMs) and the DK falsified
+        // it: its `zephyr,console` is `uart20`, wired to VCOM1 at interface
+        // 2, while interface 0 is a port that accepts bytes and never
+        // answers. Declare the right one with
+        // `embarch-topology set-dev-bench-link --interface <n>`; the guess
+        // stays as the behaviour for a bench that has never needed to.
         tracing::warn!(
-            "{} VCOM interfaces on one J-Link ({:?}) match; using the lowest interface index ({}).\n{}",
+            "{} VCOM interfaces on one J-Link ({:?}) match and nothing declared narrows them; \
+             GUESSING the lowest interface index ({}). If dev-bench does not answer, this is the \
+             first thing to suspect — declare the right one with `embarch-topology \
+             set-dev-bench-link --interface <n>`.\n{}",
             candidates.len(),
             candidates[0].serial_number,
             candidates[0].port_name,
             describe(&candidates)
         );
+        candidates[0].guessed_among = Some(candidates.len());
     }
 
     if candidates.is_empty() {
@@ -608,6 +646,57 @@ mod tests {
             ..default_filter()
         };
         assert_eq!(select(&ports, &declared).unwrap().port_name, "COM13");
+    }
+
+    /// The shape this bench actually has as of 2026-08-31, read off the
+    /// real hardware. The nRF54L15DK's link is *not* on a separate bridge
+    /// chip the way the ESP32-C5's had to be — its console UART goes through
+    /// the DK's own onboard J-Link OB — so the enrolled JTAG probe's serial
+    /// and the link port's serial are the same string and no
+    /// `link_port_serial` is needed. But that same probe exposes **two**
+    /// VCOMs under that one serial, so the serial narrows to a pair and
+    /// stops; only a declared interface finishes the job. Meanwhile the
+    /// separately-enrolled DUT's own J-Link VCOM is excluded by serial
+    /// despite matching both VID and product string.
+    #[test]
+    fn a_two_vcom_probe_needs_a_declared_interface_not_a_declared_serial() {
+        let ports = vec![
+            usb("COM16", SEGGER_VID, Some("JLink CDC UART Port"), Some("001057729826"), Some(0)),
+            usb("COM17", SEGGER_VID, Some("JLink CDC UART Port"), Some("001057729826"), Some(2)),
+            usb("COM5", SEGGER_VID, Some("JLink CDC UART Port"), Some("000852006107"), Some(0)),
+        ];
+
+        // Undeclared: the probe serial narrows to the pair and no further,
+        // so this is a *guess* — and on this DK it is the wrong one. What
+        // matters is that it now says so.
+        let guessing = Filter {
+            serial: Some("001057729826".to_string()),
+            serial_is_fallback: true,
+            ..default_filter()
+        };
+        let guessed = select(&ports, &guessing).unwrap();
+        assert_eq!(guessed.port_name, "COM16");
+        assert_eq!(
+            guessed.guessed_among,
+            Some(2),
+            "a pick among several VCOMs must be reported as a guess, not as an answer"
+        );
+
+        // Declared: interface 2 is the DK's `uart20`/VCOM1, the port that
+        // actually answers a Hello. This is the whole fix.
+        let declared = Filter { interface: Some(2), ..guessing.clone() };
+        let found = select(&ports, &declared).unwrap();
+        assert_eq!(found.port_name, "COM17");
+        assert_eq!(found.detected_by, "segger-vid-match");
+        assert_eq!(
+            found.guessed_among, None,
+            "a declared interface determines the port; nothing was guessed"
+        );
+
+        // And with nothing enrolled at all it is genuinely ambiguous across
+        // two different probes, which is a hard error rather than any pick.
+        let err = select(&ports, &Filter { serial: None, ..default_filter() }).unwrap_err();
+        assert!(format!("{err}").contains("ambiguous"), "{err}");
     }
 
     #[test]

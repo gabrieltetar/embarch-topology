@@ -51,6 +51,15 @@ pub fn set_dev_bench_link_port_serial(serial: &str) -> anyhow::Result<()> {
     enrollment::set_link_port_serial(DEV_BENCH_ROLE, serial)
 }
 
+/// Declares which USB interface of dev-bench's link device carries the link
+/// — the fact a *serial* cannot supply when one probe exposes several VCOMs
+/// under one serial number (`EnrolledBoard::link_port_interface`'s own doc
+/// comment, and the nRF54L15DK that forced it). Same contract as
+/// [`set_dev_bench_link_port_serial`]: the role must already be enrolled.
+pub fn set_dev_bench_link_port_interface(interface: u8) -> anyhow::Result<()> {
+    enrollment::set_link_port_interface(DEV_BENCH_ROLE, interface)
+}
+
 /// Every declared DUT signal link (design.md §3 decision 18).
 pub fn list_signals() -> anyhow::Result<Vec<SignalLink>> {
     signal::list()

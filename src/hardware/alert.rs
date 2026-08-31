@@ -147,6 +147,7 @@ mod tests {
             hardware_id: "aaaaaaaabbbbbbbb".to_string(),
             confirmed_at_utc_ms: 1_755_000_000_000,
             link_port_serial: None,
+            link_port_interface: None,
         }
     }
 
