@@ -66,5 +66,4 @@ No hardware or elevated privileges are needed for `cargo test`. Live
 `enroll`/`validate` runs do need write access to this crate's own data
 directory (`/var/lib/embarch/topology` on Linux/macOS, `%ProgramData%\embarch\topology`
 on Windows) — the same machine-wide, admin-owned location `embarch-core`'s
-token file already uses, for the same reason (decision 3's continuity with
-that same directory).
+token file already uses, for the same reason (`spec.md`'s *Storage and roles*).
