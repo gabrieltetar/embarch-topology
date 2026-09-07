@@ -25,17 +25,54 @@ const NRF54L_FICR_INFO_DEVICEID: [u64; 2] = [0x00FF_C304, 0x00FF_C308];
 const ESP32C5_EFUSE_MAC_SYS0: u64 = 0x600B_4844;
 const ESP32C5_EFUSE_MAC_SYS1: u64 = 0x600B_4848;
 
+/// A chip's family, as far as hardware-id readback cares: which register
+/// pair [`read`] gets it from, and (via [`is_nordic_deviceid_chip`]) whether
+/// a self-reported ID has a derivable relation to that pair at all. One
+/// classifier decides both questions so they cannot disagree — see topology
+/// decision 22 and task `topology/007`, which this type closes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChipFamily {
+    /// nRF54L* / nRF54H*: `FICR.INFO.DEVICEID[0..1]`.
+    Nrf54InfoDeviceId,
+    /// Classic Nordic nRF5x/nRF9x: `FICR.DEVICEID[0..1]`.
+    NrfClassicDeviceId,
+    /// Espressif ESP32-C5.
+    Esp32C5,
+}
+
+/// Classifies `chip` by name. The nRF54L/nRF54H check runs first and is
+/// case-insensitive — `nRF54L47`, `nRF54LM10`, and a lowercase/suffixed
+/// `nrf54l15_cpuapp` all land here rather than falling through to the
+/// classic `starts_with("nRF5")` arm the way a name one character off used
+/// to (that arm matches `"nRF54..."` too, since `"nRF54"` starts with
+/// `"nRF5"`). `embarch-core`'s `flash_backend.rs` makes the same
+/// case-insensitive `nrf54l` decision for the same reason, one repo over.
+/// An unrecognized chip returns `None` — a named error, never a guess.
+fn classify_chip(chip: &str) -> Option<ChipFamily> {
+    if chip == "esp32c5" {
+        return Some(ChipFamily::Esp32C5);
+    }
+    let c = chip.to_ascii_lowercase();
+    if c.starts_with("nrf54l") || c.starts_with("nrf54h") {
+        Some(ChipFamily::Nrf54InfoDeviceId)
+    } else if c.starts_with("nrf5") || c.starts_with("nrf9") {
+        Some(ChipFamily::NrfClassicDeviceId)
+    } else {
+        None
+    }
+}
+
 /// Reads `chip`'s factory-unique hardware ID over an already-attached
 /// `core`, formatted as a lowercase hex string.
 pub fn read(core: &mut Core<'_>, chip: &str) -> Result<String> {
-    match chip {
-        "nRF54L15" | "nRF54L10" | "nRF54L05" | "nRF54LM20A" => {
+    match classify_chip(chip) {
+        Some(ChipFamily::Nrf54InfoDeviceId) => {
             read_two_words(core, NRF54L_FICR_INFO_DEVICEID, "FICR.INFO.DEVICEID")
         }
-        c if c.starts_with("nRF5") || c.starts_with("nRF9") => {
+        Some(ChipFamily::NrfClassicDeviceId) => {
             read_two_words(core, NRF5X_FICR_DEVICEID, "FICR.DEVICEID")
         }
-        "esp32c5" => {
+        Some(ChipFamily::Esp32C5) => {
             let sys0 = core
                 .read_word_32(ESP32C5_EFUSE_MAC_SYS0)
                 .context("failed to read EFUSE_RD_MAC_SYS0_REG")?;
@@ -44,8 +81,8 @@ pub fn read(core: &mut Core<'_>, chip: &str) -> Result<String> {
                 .context("failed to read EFUSE_RD_MAC_SYS1_REG")?;
             Ok(format!("{sys0:08x}{sys1:08x}"))
         }
-        other => anyhow::bail!(
-            "no hardware-id readback implemented for chip '{other}' — enrollment/gating only \
+        None => anyhow::bail!(
+            "no hardware-id readback implemented for chip '{chip}' — enrollment/gating only \
              covers Nordic nRF5x/nRF9x/nRF54L and Espressif esp32c5 today"
         ),
     }
@@ -121,15 +158,17 @@ pub fn compare_self_reported(chip: &str, jtag_read: &str, self_reported: &str) -
 }
 
 /// The Nordic chips whose [`read`] arm goes to a `DEVICEID` pair — the exact
-/// set for which [`nordic_expected_self_report`]'s derivation holds. Kept as
-/// its own predicate rather than folded into the match so it stays visibly
-/// the *same* set `read` handles: a chip added there without being added
-/// here degrades to `Undeclared`, which is safe, and the reverse would
-/// silently compare against a projection of a string `read` never produced.
+/// set for which [`nordic_expected_self_report`]'s derivation holds. Derived
+/// from [`classify_chip`] rather than re-matching, so it stays the *same*
+/// set `read` handles: a chip [`classify_chip`] adds without a `read` arm
+/// (there isn't one) degrades to `Undeclared`, which is safe, and the
+/// reverse would silently compare against a projection of a string `read`
+/// never produced.
 fn is_nordic_deviceid_chip(chip: &str) -> bool {
-    matches!(chip, "nRF54L15" | "nRF54L10" | "nRF54L05" | "nRF54LM20A")
-        || chip.starts_with("nRF5")
-        || chip.starts_with("nRF9")
+    matches!(
+        classify_chip(chip),
+        Some(ChipFamily::Nrf54InfoDeviceId) | Some(ChipFamily::NrfClassicDeviceId)
+    )
 }
 
 /// Projects a JTAG-read Nordic ID (`{deviceid0:08x}{deviceid1:08x}`, as
@@ -358,11 +397,39 @@ mod tests {
 
     #[test]
     fn unrecognized_chip_is_a_named_error_not_a_guess() {
-        let chip = "STM32F407VG";
-        let matched = matches!(chip, "nRF54L15" | "nRF54L10" | "nRF54L05" | "nRF54LM20A")
-            || chip.starts_with("nRF5")
-            || chip.starts_with("nRF9")
-            || chip == "esp32c5";
-        assert!(!matched, "STM32F407VG should fall through to the unrecognized-chip error arm");
+        assert_eq!(
+            classify_chip("STM32F407VG"),
+            None,
+            "STM32F407VG should fall through to the unrecognized-chip error arm"
+        );
+    }
+
+    #[test]
+    fn an_unlisted_nrf54l_name_still_gets_the_info_deviceid_pair() {
+        // Not one of the four exact names read()/is_nordic_deviceid_chip()
+        // used to list, but unmistakably an nRF54L part — it must not fall
+        // through to the classic FICR.DEVICEID address.
+        assert_eq!(classify_chip("nRF54L47"), Some(ChipFamily::Nrf54InfoDeviceId));
+        assert_eq!(classify_chip("nRF54LM10"), Some(ChipFamily::Nrf54InfoDeviceId));
+    }
+
+    #[test]
+    fn a_lowercase_suffixed_nrf54l_spelling_still_gets_the_info_deviceid_pair() {
+        // The Zephyr board-target spelling (`_cpuapp` suffix, all-lowercase)
+        // — flash_backend.rs accepts exactly this shape on the flash path.
+        assert_eq!(
+            classify_chip("nrf54l15_cpuapp"),
+            Some(ChipFamily::Nrf54InfoDeviceId)
+        );
+    }
+
+    #[test]
+    fn an_nrf54h_name_also_gets_the_info_deviceid_pair() {
+        assert_eq!(classify_chip("nRF54H20"), Some(ChipFamily::Nrf54InfoDeviceId));
+    }
+
+    #[test]
+    fn a_classic_nrf5_part_still_gets_the_classic_deviceid_pair() {
+        assert_eq!(classify_chip("nRF52840"), Some(ChipFamily::NrfClassicDeviceId));
     }
 }
