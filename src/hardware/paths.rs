@@ -1,7 +1,8 @@
 //! Where this crate's own persisted state lives — the machine-wide directory
 //! `embarch-core`'s `token_store.rs` already established the convention for
 //! (`%ProgramData%\embarch` / `/var/lib/embarch`), one level down in a
-//! `topology` subdirectory this crate owns outright.
+//! `topology` subdirectory this crate owns outright. Why the same directory
+//! as Core's, rather than one of this crate's own: decision 23.
 //!
 //! This resolves the crate-internal storage schema/location question (spec.md's
 //! "Storage and roles"): reuse the exact directory `known_boards.toml` already used
