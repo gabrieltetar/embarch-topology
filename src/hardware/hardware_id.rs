@@ -32,7 +32,8 @@ const ESP32C5_EFUSE_MAC_SYS1: u64 = 0x600B_4848;
 /// decision 22 and task `topology/007`, which this type closes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ChipFamily {
-    /// nRF54L* / nRF54H*: `FICR.INFO.DEVICEID[0..1]`.
+    /// nRF54L*: `FICR.INFO.DEVICEID[0..1]`. **nRF54H is deliberately not
+    /// here** — see [`classify_chip`].
     Nrf54InfoDeviceId,
     /// Classic Nordic nRF5x/nRF9x: `FICR.DEVICEID[0..1]`.
     NrfClassicDeviceId,
@@ -40,20 +41,37 @@ enum ChipFamily {
     Esp32C5,
 }
 
-/// Classifies `chip` by name. The nRF54L/nRF54H check runs first and is
+/// Classifies `chip` by name. The nRF54L check runs first and is
 /// case-insensitive — `nRF54L47`, `nRF54LM10`, and a lowercase/suffixed
 /// `nrf54l15_cpuapp` all land here rather than falling through to the
 /// classic `starts_with("nRF5")` arm the way a name one character off used
 /// to (that arm matches `"nRF54..."` too, since `"nRF54"` starts with
 /// `"nRF5"`). `embarch-core`'s `flash_backend.rs` makes the same
-/// case-insensitive `nrf54l` decision for the same reason, one repo over.
+/// case-insensitive `nrf54l` decision for the same reason, one repo over,
+/// and **it stops at nRF54L as well.**
+///
+/// **nRF54H returns `None` on purpose, and it is checked before the classic
+/// prefix so it cannot reach either register pair by accident.** Decision
+/// 21's evidence for `FICR.INFO.DEVICEID` at `0x00FF_C304`/`0x00FF_C308` is
+/// entirely nRF54L — three nRF54L15s read over JTAG and one HAL cross-check
+/// — and says nothing about the Haltium family; nothing in this repo or in
+/// `embarch-core` establishes either address on an nRF54H part, and no such
+/// silicon has ever been on this bench. Sending it to the nRF54L pair and
+/// sending it to the classic pair are both guesses, and this file's rule is
+/// that an unrecognized chip is a named error, never a guess. When an
+/// nRF54H is enrolled, the way to add it is a register read on real
+/// silicon, not a prefix.
+///
 /// An unrecognized chip returns `None` — a named error, never a guess.
 fn classify_chip(chip: &str) -> Option<ChipFamily> {
     if chip == "esp32c5" {
         return Some(ChipFamily::Esp32C5);
     }
     let c = chip.to_ascii_lowercase();
-    if c.starts_with("nrf54l") || c.starts_with("nrf54h") {
+    if c.starts_with("nrf54h") {
+        // Unevidenced on both pairs; see this function's doc comment.
+        None
+    } else if c.starts_with("nrf54l") {
         Some(ChipFamily::Nrf54InfoDeviceId)
     } else if c.starts_with("nrf5") || c.starts_with("nrf9") {
         Some(ChipFamily::NrfClassicDeviceId)
@@ -424,8 +442,14 @@ mod tests {
     }
 
     #[test]
-    fn an_nrf54h_name_also_gets_the_info_deviceid_pair() {
-        assert_eq!(classify_chip("nRF54H20"), Some(ChipFamily::Nrf54InfoDeviceId));
+    fn an_nrf54h_name_is_a_named_error_rather_than_either_guess() {
+        // Decision 21's evidence for the INFO.DEVICEID pair is entirely
+        // nRF54L; nothing establishes either register pair on a Haltium
+        // part. The classic arm's `nrf5` prefix would otherwise swallow it,
+        // which is why nRF54H is checked first and refused explicitly
+        // rather than merely left off the nRF54L arm.
+        assert_eq!(classify_chip("nRF54H20"), None);
+        assert_eq!(classify_chip("nrf54h20_cpuapp"), None);
     }
 
     #[test]
