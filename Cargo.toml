@@ -3,14 +3,14 @@ name = "embarch-topology"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "The EmbArch suite's shared software- and hardware-topology crate: resolve_software_topology()/resolve_dev_bench_port()/enrollment/validate(), linked live by embarch-core, embarch-api, and embarch-umbrella, plus a thin CLI binary over the same functions. embarch-doc/embarch-topology/design.md is the source of truth."
+description = "The EmbArch suite's shared software- and hardware-topology crate: resolve_software_topology()/resolve_dev_bench_port()/enrollment/validate(), linked live by embarch-core, embarch-api, and embarch-umbrella, plus a thin CLI binary over the same functions. embarch-doc/embarch-topology/spec.md is the source of truth."
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
-# The `embarch-topology` binary (CLI, design.md §3 decision 5 — its local web
-# UI half retired 2026-08-24, embarch-ui/milestone-1.md §4.9) is a `[[bin]]`
+# The `embarch-topology` binary (CLI, decision 5 — its local web
+# UI half retired 2026-08-24, decision 5) is a `[[bin]]`
 # target in this same package rather than a separate crate — same shape as
-# embarch-study-designer's `extract-gatt-config` tool (design.md §5's
+# embarch-study-designer's `extract-gatt-config` tool (decision 13's
 # cross-repo-dependency precedent this repo follows). Gated behind the `bin`
 # feature so a plain library consumer (embarch-core with
 # `default-features = false, features = ["hardware"]`, embarch-api/
@@ -37,9 +37,9 @@ tracing-subscriber = { version = "0.3.23", optional = true }
 # `default-features = false, features = ["hardware"]`.
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls"], optional = true }
 # `rt`/`macros`/`sync`/`time` cover `resolve_software_topology()`'s async fn.
-# Nothing under `hardware` alone needs tokio at all (`alert.rs`'s loopback
-# push is a raw, sync `std::net::TcpStream`, deliberately — see that file's
-# own doc comment). The `bin` feature no longer needs anything heavier than
+# Nothing under `hardware` alone needs tokio at all (`alert.rs`'s live-push
+# loopback POST is retired outright, decision 19 — the durable log is now the
+# only thing that module writes). The `bin` feature no longer needs anything heavier than
 # this since its own web-server half was retired (2026-08-24) — `Status`,
 # its one async subcommand, runs on a plain `new_current_thread` runtime.
 tokio = { version = "1.53.0", features = ["rt", "macros", "sync", "time"], optional = true }
@@ -48,15 +48,16 @@ tokio = { version = "1.53.0", features = ["rt", "macros", "sync", "time"], optio
 # `bin` (this crate's own CLI/UI binary) — never by embarch-api/
 # embarch-umbrella, which stay hardware-free in their own dependency
 # footprint by design (embarch-umbrella/Cargo.toml's own "deliberately
-# absent" comment; design.md §5's public-API open question, resolved here:
-# feature-gate the hardware half rather than force it on every consumer).
+# absent" comment; spec.md's "What each consumer owns now": feature-gate the
+# hardware half rather than force it on every consumer).
 probe-rs = { version = "0.31", optional = true }
 serialport = { version = "4.9.0", features = ["usbportinfo-interface"], optional = true }
 serde = { version = "1.0.228", features = ["derive"], optional = true }
 toml = { version = "1.1", optional = true }
-# The alert log (`hardware::alert`) is JSON-lines, and the same alert type
-# is what a live push's tiny loopback POST body carries — both need this
-# under `hardware` already, not just under `bin`.
+# The alert log (`hardware::alert`) is JSON-lines and needs this under
+# `hardware` already, not just under `bin` — the alert type it serializes
+# used to also be a live push's loopback POST body, but that push is retired
+# (decision 19).
 serde_json = { version = "1.0.150", optional = true }
 
 # ---- feature-gated: only pulled in by this crate's own `bin` target.
@@ -78,9 +79,9 @@ software = ["dep:reqwest", "dep:tokio"]
 hardware = ["dep:probe-rs", "dep:serialport", "dep:serde", "dep:toml", "dep:serde_json"]
 # This crate's own CLI binary. Implies both halves (the whole point of the
 # binary is to run the identical validation/enrollment logic Core runs,
-# design.md §3 decision 8, plus report software topology like `doctor`
+# decision 8, plus report software topology like `doctor`
 # does). Used to also imply a local web server's dependencies — retired
-# 2026-08-24 (embarch-ui/milestone-1.md §4.9) along with `bin/ui.rs` itself.
+# 2026-08-24 (decision 5) along with `bin/ui.rs` itself.
 bin = ["hardware", "software", "dep:clap", "dep:tracing-subscriber"]
 
 [dev-dependencies]

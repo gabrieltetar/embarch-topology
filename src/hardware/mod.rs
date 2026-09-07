@@ -1,4 +1,4 @@
-//! Hardware topology: what's physically wired to what (design.md §2). Gated
+//! Hardware topology: what's physically wired to what (spec.md). Gated
 //! behind the `hardware` feature — the only consumer today is
 //! `embarch-core` (`features = ["hardware"]`); `embarch-api`/
 //! `embarch-umbrella` never pull in `probe-rs`/`serialport` transitively
@@ -60,7 +60,7 @@ pub fn set_dev_bench_link_port_interface(interface: u8) -> anyhow::Result<()> {
     enrollment::set_link_port_interface(DEV_BENCH_ROLE, interface)
 }
 
-/// Every declared DUT signal link (design.md §3 decision 18).
+/// Every declared DUT signal link (decision 18).
 pub fn list_signals() -> anyhow::Result<Vec<SignalLink>> {
     signal::list()
 }
@@ -71,7 +71,7 @@ pub fn find_signal(name: &str) -> anyhow::Result<Option<SignalLink>> {
 }
 
 /// Declares (or re-declares) where a named signal currently goes — the
-/// write behind Core's future `POST /signals` (design.md §5). Idempotent by
+/// write behind Core's future `POST /signals`. Idempotent by
 /// name; re-declaring is how a route migrates.
 pub fn declare_signal(link: SignalLink) -> anyhow::Result<()> {
     signal::declare(link)
@@ -85,14 +85,14 @@ pub fn remove_signal(name: &str) -> anyhow::Result<bool> {
 
 /// Resolves a `Route::Direct` signal to the serial port currently carrying
 /// it, live, reusing the same `Filter` machinery dev-bench's own link
-/// resolution uses (design.md §3 decisions 17, 18). Blocking — call via
+/// resolution uses (decisions 17, 18). Blocking — call via
 /// `spawn_blocking` on an async runtime.
 pub fn resolve_signal_port(name: &str) -> anyhow::Result<DetectedPort> {
     signal::resolve_port(name)
 }
 
 /// Confirms a declared signal is where it says it is, before an operation
-/// that needs it (design.md §3 decision 18). See
+/// that needs it (decision 18). See
 /// [`signal::validate`] for exactly what this can and cannot honestly
 /// assert.
 pub fn validate_signal(name: &str) -> anyhow::Result<SignalLink> {
@@ -100,7 +100,7 @@ pub fn validate_signal(name: &str) -> anyhow::Result<SignalLink> {
 }
 
 /// Finds `embarch-dev-bench`'s serial port on this machine, live, on every
-/// call (design.md §3 decisions 3, 9 — no env var overrides any more).
+/// call (decisions 3, 9 — no env var overrides any more).
 /// Blocking — call via `spawn_blocking` on an async runtime.
 pub fn resolve_dev_bench_port() -> anyhow::Result<DevBenchPort> {
     port::detect()
@@ -108,7 +108,7 @@ pub fn resolve_dev_bench_port() -> anyhow::Result<DevBenchPort> {
 
 /// Every USB serial port the OS currently enumerates, unnarrowed — the list
 /// a human picks a [`Route::Direct`] signal's carrier from
-/// (`embarch-ui/design.md` §3 decision 10, behind Core's `GET /serial-ports`).
+/// (`embarch-ui` decision 10, behind Core's `GET /serial-ports`).
 ///
 /// Deliberately *not* [`resolve_dev_bench_port`] with the gate off; see
 /// [`port::enumerate`] for why a wire's carrier cannot be VID-gated the way
@@ -138,7 +138,7 @@ pub fn list_attached_probes() -> Vec<AttachedProbe> {
 /// board is the single most common real cause behind probe-rs's generic
 /// "target did not respond" — confirmed against a real incident, found
 /// enrolling a real DUT that turned out to simply have no power connected
-/// (`embarch-core/design.md` §3 decision 26). Call this right after
+/// (`embarch-core` decision 26). Call this right after
 /// opening a probe and before `Probe::attach` — every attach call site in
 /// this crate and `embarch-core` does (decision 8's "one implementation,
 /// multiple call sites," extended here from identity validation to this).
@@ -156,9 +156,10 @@ pub fn check_target_powered(probe: &mut probe_rs::probe::Probe) -> anyhow::Resul
 
 /// Re-verifies an already-enrolled board's live identity by the probe's own
 /// USB serial number. On mismatch, the returned error durably logs the
-/// finding and live-pushes it to `embarch-topology`'s UI if one is running,
-/// and downcasts to [`TopologyMismatch`] for the structured fields/fix-it
-/// URL (design.md §3 decisions 8, 12).
+/// finding — the live-push half that used to accompany the log is retired
+/// (decision 19); `embarch-ui` polls the same log instead — and downcasts to
+/// [`TopologyMismatch`] for the structured fields/fix-it URL (decisions 8,
+/// 12).
 pub fn validate_serial(serial: &str) -> anyhow::Result<EnrolledBoard> {
     validate::validate_serial(serial)
 }

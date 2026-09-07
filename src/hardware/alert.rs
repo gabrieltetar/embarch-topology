@@ -1,9 +1,9 @@
-//! The durable alert log behind [`super::validate`] (design.md §3 decision
+//! The durable alert log behind [`super::validate`] (decision
 //! 12): every mismatch [`super::validate`] catches is appended to a local,
 //! durable JSON-lines log the instant it happens — nothing lost to bad
 //! timing between the check and someone looking.
 //!
-//! **The live-push half is gone (design.md §3 decision 19, 2026-08-25).**
+//! **The live-push half is gone (decision 19, 2026-08-25).**
 //! Decision 12 paired that durable log with a same-machine loopback push:
 //! `embarch-topology`'s own UI (`bin/ui.rs`) wrote its bound address to a
 //! `ui.addr` marker file, and `push_live` here read it back and fired a
@@ -30,7 +30,7 @@ use super::paths;
 /// `BIND_PORT`) — the destination [`fix_it_url`] names.
 ///
 /// **Duplicated constants, deliberately, and the honest limit that comes
-/// with it** (design.md §3 decision 19): this crate does not depend on
+/// with it** (decision 19): this crate does not depend on
 /// `embarch-ui` and must not, so these are copies. `embarch-ui` lets a
 /// human override its bind address with `EMBARCH_UI_HOST`/`EMBARCH_UI_PORT`,
 /// and reading those here would be worse than useless — they would be read
@@ -92,7 +92,7 @@ pub fn record(alert: &Alert) -> Result<()> {
 /// The most recent `limit` alerts, oldest first within that window — the
 /// topology UI's own "recent mismatches" listing, and what it loads on
 /// startup so a mismatch caught while the UI wasn't running is still there
-/// to see, not lost to bad timing (design.md §3 decision 12).
+/// to see, not lost to bad timing (decision 12).
 pub fn recent(limit: usize) -> Result<Vec<Alert>> {
     let path = paths::alert_log_path()?;
     if !path.exists() {
@@ -122,7 +122,7 @@ pub fn recent(limit: usize) -> Result<Vec<Alert>> {
 /// writes (via `embarch-core`'s `GET /alerts`).
 ///
 /// **Takes no alert id, and that is a narrowing, not an oversight**
-/// (design.md §3 decision 19). It used to be `fix_it_url(alert_id)`,
+/// (decision 19). It used to be `fix_it_url(alert_id)`,
 /// pointing at a per-alert `/mismatch/{id}` detail page in the deleted
 /// `bin/ui.rs`. `embarch-ui` has no such page — its Topology tab shows the
 /// recent-alert list — so an id in the URL would be a parameter nothing on

@@ -1,8 +1,8 @@
 //! `enrollment.toml`: a machine-local table recording which physical board a
 //! debug probe's serial number is actually wired to. Formerly
-//! `embarch-core`'s own `known_boards.rs` / `known_boards.toml` (design.md
-//! §3 decisions 2, 3, 7) — this is "the one thing that's genuinely
-//! persisted, since it's declared intent, not detectable" (design.md §2):
+//! `embarch-core`'s own `known_boards.rs` / `known_boards.toml` (decisions
+//! 2, 3, 7) — this is "the one thing that's genuinely
+//! persisted, since it's declared intent, not detectable" (spec.md):
 //! nothing in a USB descriptor says "I'm wired to the DUT." A human's
 //! one-time act of physically isolating a board and enrolling its probe
 //! (`enroll`, [`super::validate`]) is the only source for this table; the
@@ -32,7 +32,7 @@ pub struct EnrolledBoard {
     /// `None` for every other role. Exists because `probe_serial` above is
     /// the JTAG debug probe's own serial, and on real dev-bench hardware
     /// whose runtime link moved to a dedicated UART bridge chip
-    /// (`embarch-core/design.md` decision 21's port migration), that bridge
+    /// (`embarch-core` decision 21's port migration), that bridge
     /// is a *different physical USB device* with its own, unrelated serial
     /// — nothing observable over USB proves the two are the same board, so
     /// this can't be inferred the way `hardware_id` is; it's a second
@@ -66,7 +66,7 @@ pub struct EnrolledBoard {
 }
 
 /// `enrollment.toml`'s whole contents: the enrolled-board table this file
-/// was written for, plus the declared-signal table design.md §3 decision 18
+/// was written for, plus the declared-signal table decision 18
 /// added alongside it. One file, because both are the same kind of thing —
 /// a declared fact about what is physically wired to what, which no
 /// detection can produce.

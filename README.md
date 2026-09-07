@@ -5,7 +5,7 @@ The EmbArch suite's single place for both software topology (where
 remote) and hardware topology (what's physically wired to what — dev-bench's
 port, board identity, probe enrollment).
 
-Design doc (source of truth): [`embarch-doc/embarch-topology/design.md`](../embarch-doc/embarch-topology/design.md).
+Current truth: [`embarch-doc/embarch-topology/spec.md`](../embarch-doc/embarch-topology/spec.md). Why: [`decisions.md`](../embarch-doc/embarch-topology/decisions.md). Unresolved: [`open.md`](../embarch-doc/embarch-topology/open.md).
 
 ## What this is
 
@@ -35,7 +35,7 @@ Two things built from one codebase:
    fix things directly. Used to also serve a loopback-only local web UI
    (`ui` subcommand) — retired 2026-08-24 in favor of `embarch-ui`'s
    Topology tab, which covers the same ground over `embarch-core`'s HTTP
-   API instead (`embarch-doc/embarch-ui/milestone-1.md` §4.9).
+   API instead (decision 5).
 
 ## Depending on this crate
 
@@ -66,5 +66,5 @@ No hardware or elevated privileges are needed for `cargo test`. Live
 `enroll`/`validate` runs do need write access to this crate's own data
 directory (`/var/lib/embarch/topology` on Linux/macOS, `%ProgramData%\embarch\topology`
 on Windows) — the same machine-wide, admin-owned location `embarch-core`'s
-token file already uses, for the same reason (design.md §5's storage-location
-decision).
+token file already uses, for the same reason (decision 3's continuity with
+that same directory).

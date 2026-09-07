@@ -1,5 +1,5 @@
 //! Software topology: where is `embarch-core`, relative to whoever's asking,
-//! and how do we know? `embarch-doc/embarch-topology/design.md` §2, §3
+//! and how do we know? `embarch-doc/embarch-topology/spec.md`,
 //! decisions 3, 4, 11.
 //!
 //! This is the former `embarch-api`/`embarch-umbrella` `topology.rs` — until
@@ -19,7 +19,7 @@
 //! exactly that). It's the wrong shape now that there's only one
 //! implementation: nothing is duplicated by this crate owning its own tiny,
 //! short-timeout client, and every consumer gets "give me `base_url`" as one
-//! call instead of wiring the pieces together themselves (design.md decision
+//! call instead of wiring the pieces together themselves (decision
 //! 1's framing).
 
 use std::future::Future;
@@ -217,7 +217,7 @@ pub fn parse_default_gateway(ip_route_output: &str) -> Option<String> {
     })
 }
 
-// ---- I/O this module now owns outright (design.md §3 decision 2's
+// ---- I/O this module now owns outright (decision 2's
 // rationale: a compiled-in library call carries none of the "can be down"
 // risk that ruled out a standalone service, so there's no reason left to
 // keep this out of the crate the way the old mirrored-module split had to).
@@ -254,7 +254,7 @@ async fn probe_core(client: &reqwest::Client, base_url: &str) -> ProbeOutcome {
 /// The result of one live `resolve_software_topology()` call: what won (if
 /// anything), and every attempt tried, for a caller that wants to report
 /// *which* candidate answered, not just pass/fail — `doctor`'s existing
-/// posture (design.md §2's architecture note on this).
+/// posture (spec.md's architecture note on this).
 #[derive(Debug, Clone)]
 pub struct ResolvedSoftwareTopology {
     pub winner: Option<Candidate>,
@@ -271,8 +271,8 @@ impl ResolvedSoftwareTopology {
     }
 }
 
-/// Find Core, live, on every call — no cache, no write-ahead file (design.md
-/// §3 decision 3). `declared_host` is whatever a consumer's own config
+/// Find Core, live, on every call — no cache, no write-ahead file (decision
+/// 3). `declared_host` is whatever a consumer's own config
 /// declares (`embarch-api`'s `config.toml` `[core].host`, say) — pass `None`
 /// when nothing's been declared. `declared_base_url`, when set, is a literal
 /// address that always wins outright over auto-detection (matching the
@@ -312,16 +312,16 @@ pub async fn resolve_software_topology(
 }
 
 /// What bind address Core should be installed with for a given software
-/// topology (design.md §2's "bind-address rules"). `embarch-umbrella`'s
+/// topology (spec.md's "bind-address rules"). `embarch-umbrella`'s
 /// `setup` is the caller — Core itself just takes whatever `--bind` it's
-/// told (`embarch-core/design.md` §3 decision 6) rather than re-deriving
+/// told (`embarch-core` decision 6) rather than re-deriving
 /// this on every start, since the answer is fixed for the life of the
-/// installed service (design.md §3 decision 3's "once at process startup for
+/// installed service (decision 3's "once at process startup for
 /// anything that can't change" case).
 pub fn recommended_bind_address(class: TopologyClass) -> &'static str {
     match class {
         // Core reachable only from this same machine — the narrow default
-        // (`embarch-core/design.md` §3 decision 6's amendment).
+        // (`embarch-core` decision 6's amendment).
         TopologyClass::Local => "127.0.0.1",
         // A WSL2 guest reaches its Windows host over the gateway address,
         // never loopback — Core has to actually listen on every interface

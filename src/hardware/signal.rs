@@ -1,4 +1,4 @@
-//! DUT signal links — design.md §3 decision 18.
+//! DUT signal links — decision 18.
 //!
 //! Until this existed, this crate modelled **boards and their probes/links,
 //! but nothing about a signal that leaves a board.** It could say "this
@@ -24,8 +24,7 @@
 //! as "the temporary way it happens to be wired" is what makes the eventual
 //! move a one-field change plus dev-bench firmware — not a redesign of
 //! anything that consumes it, and not a study re-authoring (a `Study` names
-//! the signal, never the carrier: `embarch-study-designer/design.md` §3
-//! decision 39).
+//! the signal, never the carrier: `embarch-study-designer` decision 39).
 //!
 //! **Scope is deliberately narrow, matching decisions 10/11:** signals are
 //! an extensible table, not a hardcoded list, but there is no logic here for
@@ -39,11 +38,11 @@ use super::enrollment;
 use super::port::{self, DetectedPort, Filter};
 
 /// A named signal originating at a board, with a declared route that may
-/// deliberately bypass dev-bench (design.md §3 decision 18).
+/// deliberately bypass dev-bench (decision 18).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignalLink {
     /// What a `Study` names when it taps this signal
-    /// (`embarch-study-designer/design.md` §4.8's
+    /// (`embarch-study-designer` decision 39's
     /// `StreamSource::Signal { name }`). Unique within the table.
     pub name: String,
     /// The enrollment role the signal comes out of — `"dut"` for the
@@ -57,7 +56,7 @@ pub struct SignalLink {
 }
 
 /// Which way a signal travels. The outpost is [`DutToHost`](Self::DutToHost)
-/// and TX-only (`embarch-outpost/design.md` §1).
+/// and TX-only (`embarch-outpost`'s spec.md).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SignalDirection {
@@ -66,7 +65,7 @@ pub enum SignalDirection {
     Bidirectional,
 }
 
-/// Where a signal currently goes (design.md §3 decision 18).
+/// Where a signal currently goes (decision 18).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", tag = "kind")]
 pub enum Route {
@@ -83,7 +82,7 @@ pub enum Route {
     Direct { port_serial: String },
     /// Terminates on declared dev-bench pins; dev-bench relays it over its
     /// existing Core link, **passing bytes through and interpreting
-    /// nothing** (`embarch-outpost/design.md` §3 decision 11).
+    /// nothing** (`embarch-outpost` decision 11).
     ///
     /// Not resolvable to a port by this crate — the carrier is dev-bench's
     /// own already-resolved link. Nothing on this bench has the pins for it
@@ -94,7 +93,7 @@ pub enum Route {
 /// A declared signal isn't where it says it is — the same structured,
 /// downcastable idiom [`TopologyMismatch`](super::validate::TopologyMismatch)
 /// and [`NotFound`](super::port::NotFound) already establish for this
-/// crate's "no guessing" errors (design.md §3 decision 12).
+/// crate's "no guessing" errors (decision 12).
 ///
 /// **Not written to `alerts.jsonl`**, unlike a board mismatch, and that is a
 /// deliberate gap rather than an oversight: [`Alert`](super::alert::Alert)'s
@@ -103,7 +102,7 @@ pub enum Route {
 /// with empty strings that a UI would render as facts is precisely the
 /// silent-mislabelling this crate exists to prevent. Recording signal
 /// mismatches durably wants the alert record to grow a subject
-/// discriminator first; see design.md §5.
+/// discriminator first; see open.md.
 #[derive(Debug)]
 pub struct SignalMismatch {
     pub name: String,
@@ -190,7 +189,7 @@ pub fn remove(name: &str) -> Result<bool> {
 
 /// Resolves a `Direct` signal to the serial port currently carrying it, live,
 /// on every call — no cached answer, same construction as
-/// [`port::detect`](super::port::detect) (design.md §3 decisions 3, 9).
+/// [`port::detect`](super::port::detect) (decisions 3, 9).
 ///
 /// Blocking (`serialport::available_ports` is synchronous, as is the
 /// enrollment-file read) — callers on an async runtime should run this via
@@ -239,7 +238,7 @@ fn resolve_link_port(link: &SignalLink) -> Result<DetectedPort> {
 
 /// Confirms a declared signal is where it says it is, **before an operation
 /// that needs it** — the signal-side counterpart of
-/// [`validate_role`](super::validate_role) (design.md §3 decision 18).
+/// [`validate_role`](super::validate_role) (decision 18).
 ///
 /// **What this can honestly assert, stated rather than implied.** For a
 /// `Direct` route it confirms the declared `port_serial` is currently

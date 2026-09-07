@@ -3,7 +3,7 @@
 //! cross-checks against [`super::enrollment`], since it survives a probe
 //! getting physically moved to a different board in a way a bare USB serial
 //! number can't. Formerly `embarch-core`'s own `hardware_id.rs`, moved here
-//! unchanged (design.md §3 decisions 2, 4).
+//! unchanged (decisions 2, 4).
 //!
 //! Only the two chip families this suite's real hardware actually uses are
 //! implemented. An unrecognized chip is a named error, never a guess.
@@ -70,7 +70,7 @@ pub enum SelfReportedIdentity {
 }
 
 /// Relates a chip ID a board reported about itself to the one [`read`] just
-/// read over JTAG (`embarch-core/design.md` §3 decision 35).
+/// read over JTAG (`embarch-core` decision 35).
 ///
 /// **Why this needs a relation at all, rather than string equality.** The two
 /// come from different mechanisms and are not obliged to agree byte for byte:

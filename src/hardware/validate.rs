@@ -1,5 +1,5 @@
 //! Live board-identity validation — formerly `embarch-core`'s own
-//! `board_gate.rs` (design.md §3 decisions 2, 8). One implementation,
+//! `board_gate.rs` (decisions 2, 8). One implementation,
 //! multiple call sites: `embarch-core`'s `hardware::flash`/`reset` and
 //! `study.rs`'s dev-bench handshake call exactly the functions here, and so
 //! does `embarch-topology`'s own CLI/UI — there is no second, independently-
@@ -10,11 +10,11 @@
 //! logged (`alert.rs`) before the structured error is even constructed, so
 //! the record exists regardless of what the caller does with the `Err` it
 //! gets back. The live push that used to accompany that log was retired
-//! 2026-08-25 (design.md §3 decision 19) — `embarch-ui` polls the same log
+//! 2026-08-25 (decision 19) — `embarch-ui` polls the same log
 //! through `embarch-core`'s `GET /alerts` instead.
 //!
-//! **What this does not close on its own** (design.md §3 decision 8's own
-//! "real gap" note, and §5's open question): confirming the enrolled
+//! **What this does not close on its own** (decision 8's own
+//! "real gap" note): confirming the enrolled
 //! JTAG-capable probe is still attached and matches proves the *debug
 //! connection* to a role's chip is genuine. It does not, by itself, prove
 //! that some other currently-detected link (`super::port::detect`'s
@@ -27,7 +27,7 @@
 //! add on its own)" — the first half was exactly right and the second half
 //! was the wrong conclusion to draw from it. `embarch-study-designer`'s
 //! `HelloAck` now carries dev-bench's self-reported chip ID
-//! (`embarch-core/design.md` §3 decision 35), and this crate supplies the
+//! (`embarch-core` decision 35), and this crate supplies the
 //! piece that makes it usable: [`super::compare_self_reported`], which is
 //! chip knowledge and therefore belongs here rather than in Core. A
 //! firmware protocol change being outside this crate's reach never meant the
@@ -73,7 +73,7 @@ const UNPOWERED_VOLTAGE_THRESHOLD_V: f32 = 1.0;
 /// Best-effort early diagnosis for an attach that's about to fail because
 /// the board genuinely has no power — the single most common real-world
 /// cause behind probe-rs's own generic "target did not respond," confirmed
-/// against a real incident (`embarch-core/design.md` §3 decision 26).
+/// against a real incident (`embarch-core` decision 26).
 /// Reads the probe's own sensed target-voltage pin
 /// (`Probe::get_target_voltage`) if it has one; not every probe type
 /// supports this (`Ok(None)`), in which case — same as a plausible-looking
@@ -113,7 +113,7 @@ pub fn list_attached_probes() -> Vec<AttachedProbe> {
 /// A live check found the enrolled board isn't there, or isn't what was
 /// recorded — downcast an `anyhow::Error` from [`validate_role`]/
 /// [`validate_serial`] to this to get the structured fields and the
-/// fix-it URL (design.md §3 decision 12), the same idiom
+/// fix-it URL (decision 12), the same idiom
 /// [`super::port::NotFound`] already established for "no guessing" errors
 /// in this crate.
 #[derive(Debug)]
@@ -161,9 +161,9 @@ fn raise(known: &EnrolledBoard, live_hardware_id: Option<String>, reason: String
 }
 
 /// No board is enrolled under this role (or serial) yet — a normal,
-/// expected state (design.md §3 decision 7's "declared facts can be unset"),
+/// expected state (decision 7's "declared facts can be unset"),
 /// not a bug. Downcastable so a caller — `embarch-core`'s new `POST
-/// /validate` (design.md §3 decision 28) — can tell it apart from a genuine
+/// /validate` (`embarch-core` decision 28) — can tell it apart from a genuine
 /// [`TopologyMismatch`] or an unrelated I/O error and answer with a `404`
 /// rather than a `500`, the same "no guessing" idiom [`super::port::NotFound`]
 /// already established for this crate's other structured errors.
@@ -270,7 +270,7 @@ pub fn validate_role(role: &str) -> Result<EnrolledBoard> {
 /// J-Link DUT alongside dev-bench's own ESP JTAG) doesn't have to physically
 /// isolate them one at a time just to satisfy this function — `embarch-
 /// core`'s own `GET /enroll` page's drag-and-drop UI is the first caller
-/// that needs this (design.md decision 15). Omitted, the original
+/// that needs this (decision 15). Omitted, the original
 /// behavior is unchanged: refuses anything but exactly one attached probe,
 /// the only sane default when there's no other way to tell which one a
 /// caller means.

@@ -1,5 +1,5 @@
-# Release CI for the `embarch-topology` binary (CLI + local web UI,
-# design.md §3 decision 5) — mirrors embarch-core's own release.yml exactly
+# Release CI for the `embarch-topology` binary (CLI; its local web UI half
+# is retired, decision 5) — mirrors embarch-core's own release.yml exactly
 # (same probe-rs/serialport dependency shape under `--features bin`, same
 # four targets), since this repo has no cross-repo path dependency of its
 # own to worry about (unlike embarch-core/embarch-api/embarch-umbrella's

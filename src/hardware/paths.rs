@@ -3,8 +3,8 @@
 //! (`%ProgramData%\embarch` / `/var/lib/embarch`), one level down in a
 //! `topology` subdirectory this crate owns outright.
 //!
-//! This resolves design.md §5's "crate-internal storage schema/location"
-//! open question: reuse the exact directory `known_boards.toml` already used
+//! This resolves the crate-internal storage schema/location question (spec.md's
+//! "Storage and roles"): reuse the exact directory `known_boards.toml` already used
 //! (continuity — this *is* that file's replacement, decision 3), scoped under
 //! its own subdirectory so this crate's files (`enrollment.toml`,
 //! `alerts.jsonl`) don't sit loose next to Core's `token`/`logs`.
@@ -45,6 +45,6 @@ pub fn alert_log_path() -> Result<PathBuf> {
 // `validate()` call elsewhere on the machine could push it a live alert.
 // `bin/ui.rs` was deleted 2026-08-24 and `embarch-ui` never wrote the
 // marker, so nothing has produced this file since; retired with the rest of
-// the live-push mechanism (design.md §3 decision 19). Named here rather
+// the live-push mechanism (decision 19). Named here rather
 // than silently dropped because the file may still exist on a machine that
 // ran the old UI, and nothing reads it any more.

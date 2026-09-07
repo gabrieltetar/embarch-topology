@@ -1,10 +1,10 @@
 //! `embarch-topology`: the thin CLI over this crate's own functions
-//! (design.md §3 decision 8) — a human sees exactly what `embarch-core`
+//! (decision 8) — a human sees exactly what `embarch-core`
 //! enforces live, because it's literally the same code.
 //!
 //! **The local web UI this binary used to also serve (`Ui` subcommand,
 //! `bin/ui.rs`) is retired, 2026-08-24** — `embarch-ui` covers the same
-//! ground now (`embarch-doc/embarch-ui/milestone-1.md` §4.9). Every
+//! ground now (decision 5). Every
 //! read-only function `bin/ui.rs` called (`list_enrolled`, `recent_alerts`,
 //! `list_attached_probes`, etc.) stays right where it was, in `hardware`
 //! below — only the page/server that rendered them here is gone.

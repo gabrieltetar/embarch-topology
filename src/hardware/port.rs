@@ -1,12 +1,12 @@
 //! Auto-detection of `embarch-dev-bench`'s serial port — formerly
 //! `embarch-core`'s own `dev_bench.rs`, moved here unchanged in its VID/
-//! product/interface heuristic (design.md §3 decisions 2, 4).
+//! product/interface heuristic (decisions 2, 4).
 //!
 //! **The one real behavior change in the move: no env var overrides.**
 //! `EMBARCH_DEV_BENCH_PORT`/`_PRODUCT`/`_SERIAL`/`_INTERFACE` are gone
-//! outright (design.md §3 decision 9, retired-but-still-load-bearing) — they
+//! outright (decision 9, retired-but-still-load-bearing) — they
 //! were exactly the mechanism that caused the incident this crate exists to
-//! prevent (design.md §1). What's left of `EMBARCH_DEV_BENCH_SERIAL`'s old
+//! prevent (spec.md). What's left of `EMBARCH_DEV_BENCH_SERIAL`'s old
 //! job — disambiguating dev-bench from some other SEGGER-VID device on the
 //! same bench — is covered by [`enrollment`](super::enrollment)'s dev-bench-
 //! role fallback (the enrolled JTAG probe's own serial) *when* dev-bench's
@@ -70,7 +70,7 @@ pub const DEV_BENCH_ROLE: &str = "dev-bench";
 /// One detected serial port, plus whatever USB identity the OS reported for
 /// it. Named for dev-bench because that was the only thing this module
 /// resolved when it was written; [`SignalLink`](super::signal::SignalLink)'s
-/// `Route::Direct` (design.md §3 decision 18) resolves through the same
+/// `Route::Direct` (decision 18) resolves through the same
 /// machinery and gets the same shape back, which is why the type now has a
 /// neutral name and [`DevBenchPort`] is an alias rather than a second type.
 #[derive(Debug, Clone, Serialize)]
@@ -176,7 +176,7 @@ pub struct Filter {
     /// bench link at all" when nothing more specific is known. `true` is for
     /// a route whose `port_serial` is a **declared** fact
     /// ([`SignalLink`](super::signal::SignalLink)'s `Route::Direct`,
-    /// design.md §3 decision 18): the serial already identifies exactly one
+    /// decision 18): the serial already identifies exactly one
     /// device, so gating on VID could only ever exclude the right answer —
     /// a DUT signal may perfectly well land on an FTDI or CH340 bridge
     /// nobody has taught this module about.
@@ -240,7 +240,7 @@ impl Filter {
 
     /// Narrows to exactly one declared USB serial, with no VID or
     /// product-string gate — [`super::signal`]'s `Route::Direct` resolution
-    /// (design.md §3 decision 18). A declared serial is a fact a human read
+    /// (decision 18). A declared serial is a fact a human read
     /// off the actual device, so it narrows hard, the same way
     /// `EnrolledBoard::link_port_serial` does (decision 17).
     pub fn for_declared_serial(serial: &str) -> Self {
@@ -406,7 +406,7 @@ fn describe(candidates: &[DetectedPort]) -> String {
 }
 
 /// Finds dev-bench's port on this machine, live, on every call — no env var
-/// short-circuits this any more (design.md §3 decisions 3, 9).
+/// short-circuits this any more (decisions 3, 9).
 ///
 /// Blocking (`serialport::available_ports` is synchronous, and so is the
 /// enrollment file read `Filter::resolve` does) — callers on an async
@@ -427,7 +427,7 @@ pub const ENUMERATED: &str = "enumerated";
 /// Every serial port the OS currently enumerates that reports a USB
 /// identity, with no VID gate and no narrowing — the list a human picks from
 /// when declaring a [`Route::Direct`](super::signal::Route::Direct) signal's
-/// carrier (`embarch-ui/design.md` §3 decision 10).
+/// carrier (`embarch-ui` decision 10).
 ///
 /// **Not [`select`], and not a superset of it.** `select` answers "which port
 /// is dev-bench's link", applying the VID gate and every narrowing rule.
