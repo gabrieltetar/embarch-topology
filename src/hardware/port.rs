@@ -76,9 +76,27 @@ pub const DEV_BENCH_ROLE: &str = "dev-bench";
 #[derive(Debug, Clone, Serialize)]
 pub struct DetectedPort {
     pub port_name: String,
-    /// `"segger-vid-match"`, `"espressif-vid-match"`, or `"silabs-vid-match"`
-    /// — which rule produced this. No `"env-override"` variant any more
-    /// (see this module's own top doc comment).
+    /// One of four values. `"segger-vid-match"`, `"espressif-vid-match"` or
+    /// `"silabs-vid-match"` when [`select`] ran with its VID gate on
+    /// (`Filter::no_vid_gate` false — dev-bench's own resolution, decision 17)
+    /// and that gate is what stood between the candidate and every other
+    /// serial device on the machine. [`DECLARED_SERIAL`] when the gate was
+    /// off instead (`Filter::for_declared_serial`, decision 18) — a directly
+    /// declared USB serial identified the candidate, and any VID at all was
+    /// eligible. [`ENUMERATED`] when [`enumerate`] ran and nothing narrowed
+    /// the candidate at all. No `"env-override"` variant any more (see this
+    /// module's own top doc comment).
+    ///
+    /// **This names which of those three regimes resolved the port, not
+    /// which individual comparison happened to eliminate the last other
+    /// candidate** — see `embarch-topology` decision 24. Within the
+    /// VID-gated regime, a declared serial or interface can still do the
+    /// real narrowing among several same-vendor candidates; the VID rule is
+    /// still credited because it is what excluded every other vendor, which
+    /// remains true regardless of what narrowed the rest. Under the
+    /// `no_vid_gate` regime the VID played no discriminating role at all
+    /// (any vendor was eligible), so it is never credited there — including
+    /// when the declared serial happens to also be a known-VID device.
     pub detected_by: &'static str,
     pub vendor_id: Option<u16>,
     pub product_id: Option<u16>,
@@ -107,12 +125,25 @@ pub struct DetectedPort {
 /// [`detect`] specifically returns.
 pub type DevBenchPort = DetectedPort;
 
+/// What `Filter::for_declared_serial`-resolved [`select`] reports for
+/// [`DetectedPort::detected_by`]: a declared USB serial, not a VID rule,
+/// identified this port (decision 18; `embarch-topology` decision 24 on why
+/// this is a distinct value rather than a VID-match string or [`ENUMERATED`]).
+pub const DECLARED_SERIAL: &str = "declared-serial";
+
 fn detected_by_for_vid(vid: u16) -> &'static str {
     match vid {
         SEGGER_VID => "segger-vid-match",
         ESPRESSIF_VID => "espressif-vid-match",
         SILABS_VID => "silabs-vid-match",
-        _ => "vid-match", // unreachable given how candidates are filtered
+        // Not reachable today: `select` only ever calls this with a VID that
+        // passed its own gate (one of the three above) when that gate is on,
+        // and overwrites the result with `DECLARED_SERIAL` when it's off;
+        // `enumerate_in` overwrites it with `ENUMERATED` unconditionally. Kept
+        // as a named fallback rather than a `panic!`/`unreachable!` so a
+        // future caller that does neither gets an honest-if-generic answer
+        // instead of one of those.
+        _ => "vid-match",
     }
 }
 
@@ -290,6 +321,18 @@ pub fn select(ports: &[SerialPortInfo], filter: &Filter) -> Result<DetectedPort>
         .filter_map(as_candidate)
         .filter(|c| {
             filter.no_vid_gate || matches!(c.vendor_id, Some(SEGGER_VID) | Some(SILABS_VID))
+        })
+        .map(|mut c| {
+            // With the VID gate off, no VID rule stood between this
+            // candidate and any other vendor's device — a declared serial
+            // did that job (`Filter::for_declared_serial`), so it, not
+            // `detected_by_for_vid`'s answer, is the honest provenance.
+            // Overwritten here rather than in `as_candidate`, which has no
+            // `Filter` to consult (`embarch-topology` decision 24).
+            if filter.no_vid_gate {
+                c.detected_by = DECLARED_SERIAL;
+            }
+            c
         })
         .collect();
     let candidate_vid_ports_seen = candidates.len();
@@ -761,5 +804,38 @@ mod tests {
         ];
         assert_eq!(select(&ports, &default_filter()).unwrap().port_name, "COM13");
         assert_eq!(enumerate_in(&ports).len(), 2);
+    }
+
+    /// The exact shape measured live 2026-09-06 (leg 020, `tasks/topology/006`):
+    /// three SEGGER candidates on the bench, so the VID rule matched all of
+    /// them and narrowed nothing — the declared serial and the declared
+    /// interface did the actual work, same as
+    /// [`a_two_vcom_probe_needs_a_declared_interface_not_a_declared_serial`].
+    /// **Pinned as accepted, not fixed** (`embarch-topology` decision 24):
+    /// `detected_by` still credits `"segger-vid-match"` here, because the
+    /// VID gate is genuinely on for this (`Filter::resolve`) path and did
+    /// exclude every non-SEGGER/Silabs device on the machine — under-selling
+    /// how much was pinned down, but not asserting something false, unlike
+    /// the `no_vid_gate` case [`DECLARED_SERIAL`] fixes.
+    #[test]
+    fn a_vid_rule_that_narrowed_nothing_is_still_credited_when_the_gate_ran() {
+        let ports = vec![
+            usb("COM16", SEGGER_VID, Some("JLink CDC UART Port"), Some("001057729826"), Some(0)),
+            usb("COM17", SEGGER_VID, Some("JLink CDC UART Port"), Some("001057729826"), Some(2)),
+            usb("COM5", SEGGER_VID, Some("JLink CDC UART Port"), Some("000852006107"), Some(0)),
+        ];
+        let filter = Filter {
+            serial: Some("001057729826".to_string()),
+            serial_is_fallback: false,
+            interface: Some(2),
+            ..default_filter()
+        };
+        let found = select(&ports, &filter).unwrap();
+        assert_eq!(found.port_name, "COM17");
+        assert_eq!(
+            found.detected_by, "segger-vid-match",
+            "the VID gate ran and did exclude every other vendor, so it is credited even though \
+             the declared serial and interface did the narrowing among these three"
+        );
     }
 }

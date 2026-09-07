@@ -306,6 +306,10 @@ mod tests {
         ];
         let found = port::select(&ports, &Filter::for_declared_serial("FT9ABCDE")).unwrap();
         assert_eq!(found.port_name, "COM21");
+        // No VID rule ran here — the gate was off — so the provenance must
+        // say so rather than crediting `detected_by_for_vid`'s fallback
+        // answer for an unrecognized VID (`embarch-topology` decision 24).
+        assert_eq!(found.detected_by, port::DECLARED_SERIAL);
     }
 
     #[test]
@@ -317,10 +321,12 @@ mod tests {
             usb("COM5", port::SEGGER_VID, Some("JLink CDC UART Port"), Some("000852006107")),
             usb("COM21", port::SILABS_VID, Some("CP210x"), Some("BRIDGE-2")),
         ];
-        assert_eq!(
-            port::select(&ports, &Filter::for_declared_serial("BRIDGE-2")).unwrap().port_name,
-            "COM21"
-        );
+        let found = port::select(&ports, &Filter::for_declared_serial("BRIDGE-2")).unwrap();
+        assert_eq!(found.port_name, "COM21");
+        // Also true when the declared-serial candidate happens to carry a
+        // recognized VID: the gate was still off, so the VID played no
+        // discriminating role and must not be credited either.
+        assert_eq!(found.detected_by, port::DECLARED_SERIAL);
         // And an undeclared serial resolves to nothing rather than to
         // whichever candidate happened to sort first.
         assert!(port::select(&ports, &Filter::for_declared_serial("NOT-HERE")).is_err());
