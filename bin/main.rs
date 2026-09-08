@@ -165,8 +165,12 @@ fn main() -> anyhow::Result<()> {
                 board.chip, board.role, board.probe_serial, board.hardware_id
             );
         }
-        Command::Validate { role } => match hardware::validate_role(&role) {
-            Ok(board) => println!("ok: '{}' still matches hardware_id {}", board.role, board.hardware_id),
+        Command::Validate { role } => match hardware::validate_role_timed(&role) {
+            Ok(v) => println!(
+                "ok: '{}' still matches hardware_id {} (enrolled_confirmed_at_utc_ms {}, \
+                 validated_at_utc_ms {})",
+                v.board.role, v.board.hardware_id, v.board.confirmed_at_utc_ms, v.validated_at_utc_ms
+            ),
             Err(e) => {
                 eprintln!("{}", render_error(&e));
                 std::process::exit(1);

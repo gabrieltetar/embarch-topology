@@ -25,7 +25,7 @@ pub use port::{
 pub use signal::{
     Route, SignalDirection, SignalLink, SignalMismatch, SignalNotDeclared,
 };
-pub use validate::{AttachedProbe, NotEnrolled, TopologyMismatch};
+pub use validate::{AttachedProbe, NotEnrolled, TopologyMismatch, Validation};
 
 /// Recent alerts from the durable log — `embarch-topology`'s own UI/CLI
 /// listing, and what a `doctor`-style check reports as evidence rather than
@@ -167,9 +167,23 @@ pub fn validate_serial(serial: &str) -> anyhow::Result<EnrolledBoard> {
     validate::validate_serial(serial)
 }
 
+/// Same live check as [`validate_serial`], additionally reporting when it
+/// ran, distinct from the returned board's own enrolment-time
+/// `confirmed_at_utc_ms` (topology decision 26).
+pub fn validate_serial_timed(serial: &str) -> anyhow::Result<Validation> {
+    validate::validate_serial_timed(serial)
+}
+
 /// Re-verifies an already-enrolled board's live identity by enrollment
 /// `role` — for a link that isn't itself a probe-rs-recognized debug probe
 /// (see [`DEV_BENCH_ROLE`]'s own doc comment).
 pub fn validate_role(role: &str) -> anyhow::Result<EnrolledBoard> {
     validate::validate_role(role)
+}
+
+/// Same live check as [`validate_role`], additionally reporting when it ran,
+/// distinct from the returned board's own enrolment-time
+/// `confirmed_at_utc_ms` (topology decision 26).
+pub fn validate_role_timed(role: &str) -> anyhow::Result<Validation> {
+    validate::validate_role_timed(role)
 }

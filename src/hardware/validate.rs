@@ -185,7 +185,30 @@ impl std::fmt::Display for NotEnrolled {
 
 impl std::error::Error for NotEnrolled {}
 
-fn validate_known(known: EnrolledBoard) -> Result<EnrolledBoard> {
+/// A live `validate` call's full result: the enrolled record — whose own
+/// `confirmed_at_utc_ms` names *enrolment* time, unmoving until someone
+/// re-enrolls — paired with `validated_at_utc_ms`, the instant *this* live
+/// check ran and succeeded. Added alongside [`validate_serial`]/
+/// [`validate_role`] rather than in place of them (topology decision 26):
+/// those two keep returning a bare [`EnrolledBoard`] so `embarch-core`'s
+/// existing call sites (`hardware::flash`/`reset`, the dev-bench handshake)
+/// go on compiling unchanged — this crate is linked live, in-process, not
+/// over the wire, so a signature change here is a same-instant break for
+/// every consumer, not a rollout. [`validate_serial_timed`]/
+/// [`validate_role_timed`] are the opt-in for a caller that wants the
+/// second timestamp, starting with this crate's own CLI.
+#[derive(Debug, Clone, Serialize)]
+pub struct Validation {
+    /// The enrolled record `validate` re-checked. Its own
+    /// `confirmed_at_utc_ms` is enrolment time, not this check.
+    pub board: EnrolledBoard,
+    /// UTC milliseconds since the epoch, read the instant this live check's
+    /// hardware-ID compare passed — i.e. *now*, not when the record was
+    /// made.
+    pub validated_at_utc_ms: u64,
+}
+
+fn validate_known_timed(known: EnrolledBoard) -> Result<(EnrolledBoard, u64)> {
     let lister = Lister::new();
     let probe_info = match lister
         .list_all()
@@ -232,20 +255,30 @@ fn validate_known(known: EnrolledBoard) -> Result<EnrolledBoard> {
         ));
     }
 
-    Ok(known)
+    // Read *after* the compare above passes — this names the instant the
+    // live check succeeded, not when the attach/read attempt merely began.
+    let validated_at_utc_ms = enrollment::now_utc_ms();
+    Ok((known, validated_at_utc_ms))
 }
 
 /// Validate by the probe's own USB serial number — `embarch-core`'s
 /// `hardware::flash`/`reset` path, once it has already resolved which
 /// attached probe a call means.
 pub fn validate_serial(serial: &str) -> Result<EnrolledBoard> {
+    validate_serial_timed(serial).map(|v| v.board)
+}
+
+/// Same live check as [`validate_serial`], additionally reporting when it
+/// ran (topology decision 26) — see [`Validation`].
+pub fn validate_serial_timed(serial: &str) -> Result<Validation> {
     let known = enrollment::find(serial)?.with_context(|| {
         format!(
             "probe '{serial}' is not enrolled — enroll it first (`embarch-topology enroll`), \
              with only this board's probe attached"
         )
     })?;
-    validate_known(known)
+    let (board, validated_at_utc_ms) = validate_known_timed(known)?;
+    Ok(Validation { board, validated_at_utc_ms })
 }
 
 /// Validate by enrollment `role` rather than by serial — for a link that
@@ -253,9 +286,16 @@ pub fn validate_serial(serial: &str) -> Result<EnrolledBoard> {
 /// bridge chip; see `super::port`'s own doc comment). `embarch-core`'s
 /// dev-bench handshake calls this before ever opening the link.
 pub fn validate_role(role: &str) -> Result<EnrolledBoard> {
+    validate_role_timed(role).map(|v| v.board)
+}
+
+/// Same live check as [`validate_role`], additionally reporting when it ran
+/// (topology decision 26) — see [`Validation`].
+pub fn validate_role_timed(role: &str) -> Result<Validation> {
     let known = enrollment::find_by_role(role)?
         .ok_or_else(|| anyhow::Error::new(NotEnrolled { role: role.to_string() }))?;
-    validate_known(known)
+    let (board, validated_at_utc_ms) = validate_known_timed(known)?;
+    Ok(Validation { board, validated_at_utc_ms })
 }
 
 /// `enroll_probe`'s implementation (`embarch-api`'s MCP tool of the same
@@ -361,4 +401,41 @@ pub fn enroll(role: &str, chip: &str, probe_serial: Option<&str>) -> Result<Enro
         );
     }
     Ok(board)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn board() -> EnrolledBoard {
+        EnrolledBoard {
+            probe_serial: "serial".into(),
+            role: "dev-bench".into(),
+            chip: "nRF54L15".into(),
+            hardware_id: "6fcddc36cb781b71".into(),
+            confirmed_at_utc_ms: 1_788_195_194_573,
+            link_port_serial: None,
+            link_port_interface: None,
+        }
+    }
+
+    /// The whole point of [`Validation`] is that a caller can tell the two
+    /// timestamps apart: the enrolled record's own `confirmed_at_utc_ms`
+    /// (enrolment time) stays nested under `board`, distinct from the new
+    /// top-level `validated_at_utc_ms` (this live check's time) — not
+    /// flattened into one namespace where the field name is the only thing
+    /// separating them.
+    #[test]
+    fn validation_keeps_the_two_timestamps_distinct_in_json() {
+        let v = Validation { board: board(), validated_at_utc_ms: 1_788_723_019_911 };
+        let json = serde_json::to_value(&v).expect("Validation must serialize");
+        let board_confirmed_at = json["board"]["confirmed_at_utc_ms"]
+            .as_u64()
+            .expect("board.confirmed_at_utc_ms must be present");
+        let validated_at =
+            json["validated_at_utc_ms"].as_u64().expect("top-level validated_at_utc_ms must be present");
+        assert_eq!(board_confirmed_at, 1_788_195_194_573);
+        assert_eq!(validated_at, 1_788_723_019_911);
+        assert_ne!(board_confirmed_at, validated_at, "a real regression this guards against");
+    }
 }
