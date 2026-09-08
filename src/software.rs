@@ -187,17 +187,13 @@ pub fn winner(attempts: &[Attempt]) -> Option<&Attempt> {
 
 /// Are we running inside a WSL2 guest?
 ///
-/// Two independent signals, either of which is enough: the kernel release
-/// string (WSL2's kernel is Microsoft-built and says so) and the environment
-/// variable WSL itself sets. Neither alone is airtight — `WSL_DISTRO_NAME`
-/// can be inherited into a context that isn't really WSL, and a custom kernel
-/// might not carry the vendor string — so this takes either.
+/// Delegates to [`crate::wsl2::detect`] (`embarch-topology` decision 27) —
+/// kept as its own public name/signature here because it's an already-used
+/// external API this crate must not break, not because the logic lives here
+/// any more; [`hardware::port`](super::hardware::port)'s `NotFound` needs the
+/// same fact from a build that never links this module at all.
 pub fn detect_wsl2(proc_version: Option<&str>, wsl_distro_env: Option<&str>) -> bool {
-    let kernel_says_so = proc_version
-        .map(|v| v.to_ascii_lowercase().contains("microsoft"))
-        .unwrap_or(false);
-    let env_says_so = wsl_distro_env.map(|v| !v.is_empty()).unwrap_or(false);
-    kernel_says_so || env_says_so
+    crate::wsl2::detect(proc_version, wsl_distro_env)
 }
 
 /// Pull the gateway address out of `ip route show default` output.
@@ -224,9 +220,7 @@ pub fn parse_default_gateway(ip_route_output: &str) -> Option<String> {
 
 /// Are we running inside a WSL2 guest, checked against this real machine.
 fn under_wsl2_here() -> bool {
-    let proc_version = std::fs::read_to_string("/proc/version").ok();
-    let wsl_distro_env = std::env::var("WSL_DISTRO_NAME").ok();
-    detect_wsl2(proc_version.as_deref(), wsl_distro_env.as_deref())
+    crate::wsl2::detect_here()
 }
 
 /// This machine's default-route gateway, if it has one — `None` on any

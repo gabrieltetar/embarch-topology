@@ -147,6 +147,38 @@ fn detected_by_for_vid(vid: u16) -> &'static str {
     }
 }
 
+/// Which narrowing rule is the one that left zero candidates —
+/// `embarch-topology` decision 27. Named so [`NotFound`]'s `Display` can send
+/// the operator to the fix that can actually work, instead of always
+/// printing the one generic "re-enroll" remedy regardless of which fact
+/// actually excluded everything (the failure decision 20 records: a stale
+/// declared `link_port_serial` hard-narrows detection to a port that no
+/// longer exists, and re-enrolling by role — the old advice — carries that
+/// same stale fact right back over, per `validate::enroll`'s own doc
+/// comment on why it's keyed on probe serial).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExcludingRule {
+    /// The VID gate excluded every candidate — no port among however many
+    /// the OS enumerated (`NotFound::total_ports_seen`) reported one of the
+    /// three recognized link VIDs.
+    NoRecognizedVid,
+    /// A declared serial ([`EnrolledBoard::link_port_serial`](super::enrollment::EnrolledBoard::link_port_serial),
+    /// applied hard — `serial_is_fallback: false`) matched no VID-recognized
+    /// candidate. The JTAG-probe-serial *fallback* can never cause this: it
+    /// only ever narrows when it actually matches something (`select`'s own
+    /// comment on why a fallback mismatch leaves `candidates` untouched).
+    DeclaredSerial,
+    /// A declared [`EnrolledBoard::link_port_interface`](super::enrollment::EnrolledBoard::link_port_interface)
+    /// matched no candidate remaining after the VID and serial rules.
+    DeclaredInterface,
+    /// Something else excluded every remaining candidate (the default
+    /// product-string needle, most likely, or a fallback serial that
+    /// happened to leave nothing once combined with the other rules) — the
+    /// original, generic "re-enroll dev-bench" advice, unchanged, because
+    /// there's no single declared fact this can point at clearing.
+    Other,
+}
+
 /// No port matched. Distinct from every other detection failure so callers
 /// can treat "dev-bench isn't plugged in" (a normal, expected state)
 /// differently from "the heuristic is ambiguous" (a real configuration
@@ -155,30 +187,79 @@ fn detected_by_for_vid(vid: u16) -> &'static str {
 pub struct NotFound {
     pub candidate_vid_ports_seen: usize,
     pub total_ports_seen: usize,
+    /// Which rule left the candidate list empty — [`ExcludingRule`]'s own
+    /// doc comment.
+    pub excluding_rule: ExcludingRule,
+    /// Does this process look like it's running inside a WSL2 guest —
+    /// `crate::wsl2::detect_here()`'s answer, a fact that costs nothing to
+    /// compute (`std`-only, no network) and is available at this exact
+    /// construction site (`embarch-topology` decision 27), unlike the live,
+    /// network-probed answer `embarch-topology status` gives — that one
+    /// needs `software`'s `reqwest`/`tokio`, which `embarch-core`'s
+    /// `hardware`-only build (this crate's own `lib.rs` doc comment) never
+    /// links, so it cannot be embedded here for every consumer.
+    ///
+    /// [`select`] itself never sets this to `true` — it's the pure half,
+    /// deliberately kept free of any real-machine read (its own doc
+    /// comment); only [`detect`], the live wrapper, fills in the real
+    /// answer.
+    pub likely_wsl2: bool,
 }
 
 impl std::fmt::Display for NotFound {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.total_ports_seen == 0 && self.likely_wsl2 {
+            // The split-host possibility leads, rather than trailing a
+            // sentence that already sent the reader to the hardware
+            // (`tasks/topology/004`'s own "Measured on the bench" finding):
+            // zero ports visible on what looks like a WSL2 guest is far more
+            // often "this process is on the wrong host" than "every cable
+            // fell out." This can't embed the live-resolved answer
+            // `embarch-topology status` would show (see `likely_wsl2`'s own
+            // doc comment on why), so it names the check to run instead of
+            // asserting a result this call never made.
+            return write!(
+                f,
+                "no embarch-dev-bench serial port found (0 serial port(s) visible) — this looks \
+                 like WSL2, and 0 ports visible almost always means Core (and this port scan) is \
+                 running on the wrong host, not that every cable fell out: run `embarch-topology \
+                 status` to see whether Core resolved on the Windows host instead, then `usbipd \
+                 attach` the board from there. If dev-bench really is meant to be reachable from \
+                 here, check its USB connection."
+            );
+        }
+
         write!(
             f,
             "no embarch-dev-bench serial port found ({} serial port(s) visible, {} with a recognized link VID ({SEGGER_VID:#06x} SEGGER / {SILABS_VID:#06x} Silicon Labs — {ESPRESSIF_VID:#06x} Espressif's native USB-Serial/JTAG is JTAG-only, see that constant's own doc comment))",
             self.total_ports_seen, self.candidate_vid_ports_seen
         )?;
-        if self.candidate_vid_ports_seen > 0 {
-            write!(
+        match self.excluding_rule {
+            ExcludingRule::NoRecognizedVid => write!(
+                f,
+                " — check dev-bench's USB connection (and `usbipd attach`, if Core and the board \
+                 are on different hosts)"
+            ),
+            ExcludingRule::DeclaredSerial => write!(
+                f,
+                " — the declared link port serial no longer matches any attached port; clear it \
+                 with `embarch-topology set-dev-bench-link --clear-serial` (falls back to the \
+                 enrolled probe's own serial), or declare the current one with `embarch-topology \
+                 set-dev-bench-link --serial <serial>`"
+            ),
+            ExcludingRule::DeclaredInterface => write!(
+                f,
+                " — the declared link port interface matches no attached port; clear it with \
+                 `embarch-topology set-dev-bench-link --clear-interface`, or declare the current \
+                 one with `embarch-topology set-dev-bench-link --interface <n>`"
+            ),
+            ExcludingRule::Other => write!(
                 f,
                 " — a matching probe/board is attached but enrollment's dev-bench-role fallback \
                  excluded it; re-enroll dev-bench (`embarch-topology enroll --role dev-bench`) \
                  with only its own probe attached"
-            )?;
-        } else {
-            write!(
-                f,
-                " — check dev-bench's USB connection (and `usbipd attach`, if Core and the board \
-                 are on different hosts)"
-            )?;
+            ),
         }
-        Ok(())
     }
 }
 
@@ -336,6 +417,16 @@ pub fn select(ports: &[SerialPortInfo], filter: &Filter) -> Result<DetectedPort>
         })
         .collect();
     let candidate_vid_ports_seen = candidates.len();
+    // First cause wins: once this is `Some`, every later branch's own
+    // `is_none()` guard leaves it alone, and a filter step on an
+    // already-empty `Vec` can only ever keep it empty — so the rule
+    // recorded here is genuinely the one that emptied the list, in the
+    // order the rules actually apply.
+    let mut excluding_rule = if candidates.is_empty() {
+        Some(ExcludingRule::NoRecognizedVid)
+    } else {
+        None
+    };
 
     if let Some(serial) = &filter.serial {
         let want = normalize(serial);
@@ -351,12 +442,16 @@ pub fn select(ports: &[SerialPortInfo], filter: &Filter) -> Result<DetectedPort>
             // link and the debug probe are the same physical USB device —
             // not true once dev-bench's link moved to a separate USB-UART
             // bridge chip (SILABS_VID). Apply it only when it actually
-            // matches something; a non-match leaves `candidates` untouched.
+            // matches something; a non-match leaves `candidates` untouched
+            // — so this branch can never be the rule that empties the list.
             if !narrowed.is_empty() {
                 candidates = narrowed;
             }
         } else {
             candidates = narrowed;
+            if candidates.is_empty() && excluding_rule.is_none() {
+                excluding_rule = Some(ExcludingRule::DeclaredSerial);
+            }
         }
     }
     if let Some(needle) = &filter.product_needle {
@@ -366,9 +461,15 @@ pub fn select(ports: &[SerialPortInfo], filter: &Filter) -> Result<DetectedPort>
                     .as_deref()
                     .is_none_or(|p| normalize(p).contains(needle))
         });
+        if candidates.is_empty() && excluding_rule.is_none() {
+            excluding_rule = Some(ExcludingRule::Other);
+        }
     }
     if let Some(interface) = filter.interface {
         candidates.retain(|c| c.interface == Some(interface));
+        if candidates.is_empty() && excluding_rule.is_none() {
+            excluding_rule = Some(ExcludingRule::DeclaredInterface);
+        }
     }
 
     candidates.sort_by(|a, b| {
@@ -425,6 +526,10 @@ pub fn select(ports: &[SerialPortInfo], filter: &Filter) -> Result<DetectedPort>
         return Err(anyhow::Error::new(NotFound {
             candidate_vid_ports_seen,
             total_ports_seen: ports.len(),
+            excluding_rule: excluding_rule.unwrap_or(ExcludingRule::Other),
+            // `select` is the pure half (this fn's own doc comment) — never
+            // a real-machine read. `detect` fills in the true answer.
+            likely_wsl2: false,
         }));
     }
 
@@ -458,7 +563,17 @@ fn describe(candidates: &[DetectedPort]) -> String {
 pub fn detect() -> Result<DevBenchPort> {
     let filter = Filter::resolve()?;
     let ports = serialport::available_ports().context("failed to enumerate serial ports")?;
-    select(&ports, &filter)
+    select(&ports, &filter).map_err(|e| match e.downcast::<NotFound>() {
+        // The one thing this live wrapper adds over `select`'s own pure
+        // result: `likely_wsl2`, a real-machine read `select` deliberately
+        // never makes (its own doc comment; `crate::wsl2::detect_here`'s own
+        // doc comment on why this is the one call site allowed to do it).
+        Ok(mut not_found) => {
+            not_found.likely_wsl2 = crate::wsl2::detect_here();
+            anyhow::Error::new(not_found)
+        }
+        Err(e) => e,
+    })
 }
 
 /// What [`enumerate`] reports as a port's provenance: nothing narrowed it,
@@ -593,6 +708,96 @@ mod tests {
         let not_found = err.downcast_ref::<NotFound>().expect("NotFound");
         assert_eq!(not_found.candidate_vid_ports_seen, 0);
         assert_eq!(not_found.total_ports_seen, 1);
+        assert_eq!(not_found.excluding_rule, ExcludingRule::NoRecognizedVid);
+        assert!(
+            !not_found.likely_wsl2,
+            "select is the pure half and must never claim a real-machine read"
+        );
+    }
+
+    /// `tasks/topology/004`'s "Measured on the bench" case: zero ports
+    /// visible on what looks like WSL2 must lead with the split-host
+    /// possibility, not bury it behind a sentence that already sent the
+    /// reader to the hardware. `select` itself never sets `likely_wsl2`
+    /// (previous test) — this pins what `Display` does once something else
+    /// (`detect`) has.
+    #[test]
+    fn zero_ports_on_what_looks_like_wsl2_leads_with_split_host() {
+        let not_found = NotFound {
+            candidate_vid_ports_seen: 0,
+            total_ports_seen: 0,
+            excluding_rule: ExcludingRule::NoRecognizedVid,
+            likely_wsl2: true,
+        };
+        let msg = format!("{not_found}");
+        assert!(
+            msg.find("WSL2").unwrap() < msg.find("USB connection").unwrap(),
+            "the split-host possibility must come before the cable check: {msg}"
+        );
+        assert!(msg.contains("embarch-topology status"), "{msg}");
+    }
+
+    /// Zero ports and "ports visible but none match a recognized VID" are
+    /// different diagnoses (supervisor direction, leg 045) — the latter must
+    /// not get the split-host lead-in even when `likely_wsl2` is true,
+    /// because a wrong-VID device being plugged in says nothing about which
+    /// host the process is on.
+    #[test]
+    fn ports_visible_but_wrong_vid_does_not_get_the_split_host_lead_in() {
+        let not_found = NotFound {
+            candidate_vid_ports_seen: 0,
+            total_ports_seen: 1,
+            excluding_rule: ExcludingRule::NoRecognizedVid,
+            likely_wsl2: true,
+        };
+        let msg = format!("{not_found}");
+        assert!(!msg.contains("WSL2"), "{msg}");
+        assert!(msg.contains("USB connection"), "{msg}");
+    }
+
+    /// Fixture test: a declared link serial that matches nothing routes to
+    /// clearing/re-declaring that serial, not to the generic re-enroll
+    /// advice that (per decision 20) carries the same stale fact right back.
+    #[test]
+    fn a_declared_serial_matching_nothing_routes_to_clearing_the_serial() {
+        let ports = vec![usb("/dev/ttyACM0", SEGGER_VID, Some("J-Link"), Some("760001"), Some(0))];
+        let filter = Filter {
+            serial: Some("no-such-serial".to_string()),
+            serial_is_fallback: false,
+            ..default_filter()
+        };
+        let err = select(&ports, &filter).unwrap_err();
+        let not_found = err.downcast_ref::<NotFound>().expect("NotFound");
+        assert_eq!(not_found.excluding_rule, ExcludingRule::DeclaredSerial);
+        let msg = format!("{not_found}");
+        assert!(msg.contains("set-dev-bench-link --clear-serial"), "{msg}");
+    }
+
+    /// Fixture test: a declared link interface that matches nothing routes
+    /// to clearing/re-declaring that interface.
+    #[test]
+    fn a_declared_interface_matching_nothing_routes_to_clearing_the_interface() {
+        let ports = vec![usb("/dev/ttyACM0", SEGGER_VID, Some("J-Link"), Some("760001"), Some(0))];
+        let filter = Filter { interface: Some(9), ..default_filter() };
+        let err = select(&ports, &filter).unwrap_err();
+        let not_found = err.downcast_ref::<NotFound>().expect("NotFound");
+        assert_eq!(not_found.excluding_rule, ExcludingRule::DeclaredInterface);
+        let msg = format!("{not_found}");
+        assert!(msg.contains("set-dev-bench-link --clear-interface"), "{msg}");
+    }
+
+    /// Fixture test: no candidate VID at all keeps the original generic
+    /// USB-connection advice — the third of the three routes the Done-when
+    /// asks to be distinguishable from each other.
+    #[test]
+    fn no_candidate_vid_at_all_keeps_the_generic_usb_advice() {
+        let ports = vec![usb("/dev/ttyACM0", 0x0483, Some("STM32 STLink"), None, Some(2))];
+        let err = select(&ports, &default_filter()).unwrap_err();
+        let not_found = err.downcast_ref::<NotFound>().expect("NotFound");
+        assert_eq!(not_found.excluding_rule, ExcludingRule::NoRecognizedVid);
+        let msg = format!("{not_found}");
+        assert!(msg.contains("check dev-bench's USB connection"), "{msg}");
+        assert!(!msg.contains("set-dev-bench-link"), "{msg}");
     }
 
     #[test]

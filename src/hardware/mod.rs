@@ -19,8 +19,8 @@ pub use enrollment::EnrolledBoard;
 pub use hardware_id::{compare_self_reported, SelfReportedIdentity};
 pub use paths::{alert_log_path, data_dir, enrollment_path};
 pub use port::{
-    DetectedPort, DevBenchPort, NotFound as DevBenchNotFound, DECLARED_SERIAL, DEV_BENCH_ROLE,
-    ENUMERATED,
+    DetectedPort, DevBenchPort, ExcludingRule as DevBenchNotFoundRule,
+    NotFound as DevBenchNotFound, DECLARED_SERIAL, DEV_BENCH_ROLE, ENUMERATED,
 };
 pub use signal::{
     Route, SignalDirection, SignalLink, SignalMismatch, SignalNotDeclared,
@@ -61,6 +61,21 @@ pub fn set_dev_bench_link_port_serial(serial: &str) -> anyhow::Result<()> {
 /// [`set_dev_bench_link_port_serial`]: the role must already be enrolled.
 pub fn set_dev_bench_link_port_interface(interface: u8) -> anyhow::Result<()> {
     enrollment::set_link_port_interface(DEV_BENCH_ROLE, interface)
+}
+
+/// Unsets a previously declared dev-bench link port serial — the clearing
+/// affordance `tasks/topology/004`/decision 27 adds: [`DevBenchNotFound`]'s
+/// `Display` now names this as the fix when that declared fact is what's
+/// hard-narrowing detection to a port that no longer exists (decision 20),
+/// and there was previously no way to do it short of hand-editing
+/// `enrollment.toml`.
+pub fn clear_dev_bench_link_port_serial() -> anyhow::Result<()> {
+    enrollment::clear_link_port_serial(DEV_BENCH_ROLE)
+}
+
+/// Same, for the declared link port interface.
+pub fn clear_dev_bench_link_port_interface() -> anyhow::Result<()> {
+    enrollment::clear_link_port_interface(DEV_BENCH_ROLE)
 }
 
 /// Every declared DUT signal link (decision 18).

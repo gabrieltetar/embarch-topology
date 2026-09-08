@@ -215,6 +215,23 @@ pub fn set_link_port_interface(role: &str, interface: u8) -> Result<()> {
     amend(role, |board| board.link_port_interface = Some(interface))
 }
 
+/// Unsets `role`'s declared link port serial, reverting
+/// [`super::port::Filter::resolve`] to its JTAG-probe-serial fallback —
+/// `embarch-topology` decision 27, closing the exact gap decision 20 named:
+/// a stale declared serial hard-narrows detection to a port that no longer
+/// exists, and there was previously no way to clear it short of hand-editing
+/// `enrollment.toml`. `role` must already be enrolled, same contract as
+/// [`set_link_port_serial`].
+pub fn clear_link_port_serial(role: &str) -> Result<()> {
+    amend(role, |board| board.link_port_serial = None)
+}
+
+/// Unsets `role`'s declared link port interface. Same contract and rationale
+/// as [`clear_link_port_serial`], for [`EnrolledBoard::link_port_interface`].
+pub fn clear_link_port_interface(role: &str) -> Result<()> {
+    amend(role, |board| board.link_port_interface = None)
+}
+
 /// The shared body of the two `set_link_port_*` functions above.
 fn amend(role: &str, f: impl FnOnce(&mut EnrolledBoard)) -> Result<()> {
     let path = paths::enrollment_path()?;
@@ -392,6 +409,59 @@ mod tests {
         "#;
         let store: Store = toml::from_str(toml).unwrap();
         assert_eq!(store.boards[0].link_port_serial, None);
+    }
+
+    /// The clearing affordance `tasks/topology/004` adds: a previously
+    /// declared link port serial can be unset again, without a hand edit of
+    /// `enrollment.toml` — the fix for decision 20's own failure mode, where
+    /// re-enrolling by role carries the stale serial right back over
+    /// (`validate::enroll`'s own doc comment on why that's keyed on probe
+    /// serial rather than role).
+    #[test]
+    fn clear_link_port_serial_unsets_a_declared_one_and_round_trips() {
+        let dir = temp_path("clear-link-port-serial-dir");
+        let path = dir.join("enrollment.toml");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut dev_bench = sample("D0:CF:13:ED:F9:30");
+        dev_bench.role = "dev-bench".to_string();
+        dev_bench.chip = "esp32c5".to_string();
+        dev_bench.link_port_serial = Some("D607104BD96EF0119D5C489B1045C30F".to_string());
+        save_at(&path, &Store { boards: vec![dev_bench], signals: Vec::new() }).unwrap();
+
+        // Reimplement clear_link_port_serial against the temp path directly
+        // — the real fn goes through paths::enrollment_path(), not
+        // overridable per-test (same idiom as the `set_*` test above).
+        let mut store = load_at(&path).unwrap();
+        store.boards.iter_mut().find(|b| b.role == "dev-bench").unwrap().link_port_serial = None;
+        save_at(&path, &store).unwrap();
+
+        let reloaded = load_at(&path).unwrap();
+        assert_eq!(reloaded.boards[0].link_port_serial, None);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Same, for `link_port_interface`.
+    #[test]
+    fn clear_link_port_interface_unsets_a_declared_one_and_round_trips() {
+        let dir = temp_path("clear-link-port-interface-dir");
+        let path = dir.join("enrollment.toml");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut dev_bench = sample("001057729826");
+        dev_bench.role = "dev-bench".to_string();
+        dev_bench.link_port_interface = Some(2);
+        save_at(&path, &Store { boards: vec![dev_bench], signals: Vec::new() }).unwrap();
+
+        let mut store = load_at(&path).unwrap();
+        store.boards.iter_mut().find(|b| b.role == "dev-bench").unwrap().link_port_interface = None;
+        save_at(&path, &store).unwrap();
+
+        let reloaded = load_at(&path).unwrap();
+        assert_eq!(reloaded.boards[0].link_port_interface, None);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

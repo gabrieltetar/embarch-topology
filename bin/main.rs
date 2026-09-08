@@ -67,11 +67,24 @@ enum Command {
     /// exactly that case — its `zephyr,console` (`uart20`) is VCOM1,
     /// interface 2, while detection's fallback guess is the lowest interface.
     /// Either flag may be given alone.
+    ///
+    /// `--clear-serial`/`--clear-interface` unset a previously declared
+    /// fact instead of declaring a new one — the fix for the exact failure
+    /// decision 20 records: a stale declared serial or interface hard-
+    /// narrows detection to a port that no longer exists, and re-enrolling
+    /// by role carries it right back over (`validate::enroll`'s own doc
+    /// comment on why that's keyed on probe serial), so there was
+    /// previously no way to clear it short of hand-editing
+    /// `enrollment.toml`.
     SetDevBenchLink {
         #[arg(long)]
         serial: Option<String>,
         #[arg(long)]
         interface: Option<u8>,
+        #[arg(long)]
+        clear_serial: bool,
+        #[arg(long)]
+        clear_interface: bool,
     },
     /// Print the most recent topology-mismatch alerts from the durable log.
     Alerts {
@@ -176,17 +189,34 @@ fn main() -> anyhow::Result<()> {
                 std::process::exit(1);
             }
         },
-        Command::SetDevBenchLink { serial, interface } => {
-            if serial.is_none() && interface.is_none() {
-                anyhow::bail!("set-dev-bench-link needs at least one of --serial or --interface");
+        Command::SetDevBenchLink { serial, interface, clear_serial, clear_interface } => {
+            if serial.is_some() && clear_serial {
+                anyhow::bail!("--serial and --clear-serial are mutually exclusive");
+            }
+            if interface.is_some() && clear_interface {
+                anyhow::bail!("--interface and --clear-interface are mutually exclusive");
+            }
+            if serial.is_none() && interface.is_none() && !clear_serial && !clear_interface {
+                anyhow::bail!(
+                    "set-dev-bench-link needs at least one of --serial, --interface, \
+                     --clear-serial, --clear-interface"
+                );
             }
             if let Some(serial) = &serial {
                 hardware::set_dev_bench_link_port_serial(serial)?;
                 println!("dev-bench link port serial set to '{serial}'");
             }
+            if clear_serial {
+                hardware::clear_dev_bench_link_port_serial()?;
+                println!("dev-bench link port serial cleared");
+            }
             if let Some(interface) = interface {
                 hardware::set_dev_bench_link_port_interface(interface)?;
                 println!("dev-bench link port interface set to {interface}");
+            }
+            if clear_interface {
+                hardware::clear_dev_bench_link_port_interface()?;
+                println!("dev-bench link port interface cleared");
             }
         }
         Command::Alerts { limit } => {

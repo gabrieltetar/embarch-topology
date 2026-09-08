@@ -34,3 +34,9 @@ pub mod software;
 
 #[cfg(feature = "hardware")]
 pub mod hardware;
+
+/// Whether this process is running inside a WSL2 guest. Unconditionally
+/// compiled (no feature gate) — zero dependencies beyond `std`, so both
+/// halves above can use it without either pulling in the other's
+/// dependencies (`wsl2`'s own doc comment; `embarch-topology` decision 27).
+mod wsl2;
