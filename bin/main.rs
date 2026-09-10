@@ -139,6 +139,43 @@ fn render_error(e: &anyhow::Error) -> String {
     }
 }
 
+/// Refuses a mutation when a live `embarch-core` answers on this machine —
+/// `embarch-topology` decision 28 (`decisions/enrollment.md`). `enroll`,
+/// `validate` and `set-dev-bench-link` all open a probe or write
+/// `enrollment.toml`, and Core already does the identical thing under its
+/// own hardware lock (`Arc<Mutex<()>>`, in-process only per
+/// `embarch-core/decisions/platform.md:46`) — a second process calling the
+/// same function races Core's lock with no queue and no message
+/// (`embarch-topology/decisions/enrollment.md:15`,
+/// `embarch-core/decisions/surfaces.md:30`), and on a `wsl-host` machine
+/// writes a *different* store than the one the Windows-service Core reads
+/// (`hardware/paths.rs`).
+///
+/// `None` here — no candidate answered — is exactly what
+/// `embarch-topology status` reports as `core: not found`, and is the one
+/// case this function lets the mutation still run in this process: the
+/// local-bootstrap machine that has no Core yet to ask, which is why this
+/// crate's own functions stay reachable rather than becoming a thin HTTP
+/// client (dispatch note, `tasks/topology/011`).
+fn refuse_if_core_reachable(
+    rt: &tokio::runtime::Runtime,
+    endpoint: &str,
+) -> anyhow::Result<()> {
+    let resolved = rt.block_on(software::resolve_software_topology(DEFAULT_CORE_PORT, None, None));
+    if let Some(w) = resolved.winner {
+        anyhow::bail!(
+            "refusing: embarch-core is reachable at {} ({}) and holds the hardware lock and \
+             the store this mutation writes (embarch-topology decision 28) — run it there \
+             instead:\n  curl -X {endpoint} {}\nThis command still runs locally when no Core \
+             answers at all (local-bootstrap).",
+            w.base_url,
+            w.class.as_str(),
+            w.base_url,
+        );
+    }
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     let cli = Cli::parse();
@@ -172,13 +209,18 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Command::Enroll { role, chip, probe_serial } => {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+            refuse_if_core_reachable(&rt, "/probes/enroll")?;
             let board = hardware::enroll(&role, &chip, probe_serial.as_deref())?;
             println!(
                 "enrolled '{}' as role '{}': probe {}, hardware_id {}",
                 board.chip, board.role, board.probe_serial, board.hardware_id
             );
         }
-        Command::Validate { role } => match hardware::validate_role_timed(&role) {
+        Command::Validate { role } => {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+            refuse_if_core_reachable(&rt, "/validate")?;
+            match hardware::validate_role_timed(&role) {
             Ok(v) => println!(
                 "ok: '{}' still matches hardware_id {} (enrolled_confirmed_at_utc_ms {}, \
                  validated_at_utc_ms {})",
@@ -188,7 +230,8 @@ fn main() -> anyhow::Result<()> {
                 eprintln!("{}", render_error(&e));
                 std::process::exit(1);
             }
-        },
+        }
+        }
         Command::SetDevBenchLink { serial, interface, clear_serial, clear_interface } => {
             if serial.is_some() && clear_serial {
                 anyhow::bail!("--serial and --clear-serial are mutually exclusive");
@@ -202,6 +245,8 @@ fn main() -> anyhow::Result<()> {
                      --clear-serial, --clear-interface"
                 );
             }
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+            refuse_if_core_reachable(&rt, "/dev-bench/link")?;
             if let Some(serial) = &serial {
                 hardware::set_dev_bench_link_port_serial(serial)?;
                 println!("dev-bench link port serial set to '{serial}'");
