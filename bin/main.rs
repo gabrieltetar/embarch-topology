@@ -166,7 +166,7 @@ fn refuse_if_core_reachable(
         anyhow::bail!(
             "refusing: embarch-core is reachable at {} ({}) and holds the hardware lock and \
              the store this mutation writes (embarch-topology decision 28) — run it there \
-             instead:\n  curl -X {endpoint} {}\nThis command still runs locally when no Core \
+             instead, against:\n  {}{endpoint}\nThis command still runs locally when no Core \
              answers at all (local-bootstrap).",
             w.base_url,
             w.class.as_str(),
