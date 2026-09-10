@@ -67,3 +67,7 @@ No hardware or elevated privileges are needed for `cargo test`. Live
 directory (`/var/lib/embarch/topology` on Linux/macOS, `%ProgramData%\embarch\topology`
 on Windows) — the same machine-wide, admin-owned location `embarch-core`'s
 token file already uses, for the same reason (decision 23).
+
+## License
+
+MIT — see [LICENSE](LICENSE).
