@@ -20,6 +20,18 @@ const NRF5X_FICR_DEVICEID: [u64; 2] = [0x1000_0060, 0x1000_0064];
 /// same two-word stride the classic layout above uses.
 const NRF54L_FICR_INFO_DEVICEID: [u64; 2] = [0x00FF_C304, 0x00FF_C308];
 
+/// STM32G0: the 96-bit factory unique device ID, three consecutive words
+/// from `UID_BASE`. **Deliberately G0-only, not `stm32`-wide** — `UID_BASE`
+/// is per-family on STM32 (G0/L4 at `0x1FFF_7590`, F4 at `0x1FFF_7A10`,
+/// H7 at `0x1FF1_E800`), so a `starts_with("stm32")` arm would read a
+/// plausible-looking word out of whatever happens to live at this address
+/// on another family. Evidence is the vendor HAL rather than a datasheet
+/// reading: every `stm32g0*xx.h` in `hal_stm32`'s `stm32cube/stm32g0xx/soc/`
+/// — `stm32g0b1xx.h` (the part this was added for) included — defines
+/// `UID_BASE (0x1FFF7590UL)`, and Zephyr's `hwinfo_stm32.c` reads its device
+/// ID as three `LL_GetUID_Word*` reads from that same base.
+const STM32G0_UID: [u64; 3] = [0x1FFF_7590, 0x1FFF_7594, 0x1FFF_7598];
+
 /// ESP32-C5: `EFUSE_RD_MAC_SYS0_REG`/`EFUSE_RD_MAC_SYS1_REG`, the
 /// factory-programmed base MAC address.
 const ESP32C5_EFUSE_MAC_SYS0: u64 = 0x600B_4844;
@@ -39,6 +51,9 @@ enum ChipFamily {
     NrfClassicDeviceId,
     /// Espressif ESP32-C5.
     Esp32C5,
+    /// STM32G0: the 96-bit `UID_BASE` triple. See [`STM32G0_UID`] for why
+    /// this variant names one STM32 family rather than the vendor.
+    Stm32G0Uid,
 }
 
 /// Classifies `chip` by name. The nRF54L check runs first and is
@@ -85,6 +100,12 @@ fn classify_chip(chip: &str) -> Option<ChipFamily> {
         Some(ChipFamily::Nrf54InfoDeviceId)
     } else if c.starts_with("nrf5") || c.starts_with("nrf9") {
         Some(ChipFamily::NrfClassicDeviceId)
+    } else if c.starts_with("stm32g0") {
+        // Narrow on purpose: the prefix stops at the family, not at `stm32`,
+        // because `UID_BASE` moves between STM32 families. Every other STM32
+        // still reaches the `None` arm below, which is the named error this
+        // file's rule asks for rather than a read at a guessed address.
+        Some(ChipFamily::Stm32G0Uid)
     } else {
         None
     }
@@ -95,11 +116,12 @@ fn classify_chip(chip: &str) -> Option<ChipFamily> {
 pub fn read(core: &mut Core<'_>, chip: &str) -> Result<String> {
     match classify_chip(chip) {
         Some(ChipFamily::Nrf54InfoDeviceId) => {
-            read_two_words(core, NRF54L_FICR_INFO_DEVICEID, "FICR.INFO.DEVICEID")
+            read_words(core, &NRF54L_FICR_INFO_DEVICEID, "FICR.INFO.DEVICEID")
         }
         Some(ChipFamily::NrfClassicDeviceId) => {
-            read_two_words(core, NRF5X_FICR_DEVICEID, "FICR.DEVICEID")
+            read_words(core, &NRF5X_FICR_DEVICEID, "FICR.DEVICEID")
         }
+        Some(ChipFamily::Stm32G0Uid) => read_words(core, &STM32G0_UID, "UID"),
         Some(ChipFamily::Esp32C5) => {
             let sys0 = core
                 .read_word_32(ESP32C5_EFUSE_MAC_SYS0)
@@ -111,7 +133,7 @@ pub fn read(core: &mut Core<'_>, chip: &str) -> Result<String> {
         }
         None => anyhow::bail!(
             "no hardware-id readback implemented for chip '{chip}' — enrollment/gating only \
-             covers Nordic nRF5x/nRF9x/nRF54L and Espressif esp32c5 today"
+             covers Nordic nRF5x/nRF9x/nRF54L, Espressif esp32c5 and ST STM32G0 today"
         ),
     }
 }
@@ -260,14 +282,24 @@ fn esp32c5_expected_self_report(jtag_read: &str) -> Option<String> {
     Some(format!("{:02x}{:02x}{sys0:08x}", (sys1 >> 8) as u8, sys1 as u8))
 }
 
-fn read_two_words(core: &mut Core<'_>, addresses: [u64; 2], name: &str) -> Result<String> {
-    let a = core
-        .read_word_32(addresses[0])
-        .with_context(|| format!("failed to read {name}[0] at {:#x}", addresses[0]))?;
-    let b = core
-        .read_word_32(addresses[1])
-        .with_context(|| format!("failed to read {name}[1] at {:#x}", addresses[1]))?;
-    Ok(format!("{a:08x}{b:08x}"))
+/// Reads consecutive ID words and concatenates them as lowercase hex, eight
+/// digits per word, in the order given.
+///
+/// **Took a `[u64; 2]` until 2026-09-11**, when STM32G0's 96-bit `UID_BASE`
+/// triple needed a third word. Widening it rather than adding a parallel
+/// three-word function keeps one definition of what an ID string *is*: for a
+/// two-word slice this emits byte-identical output to the old function, so
+/// every hardware ID already recorded in `enrollment.toml` still compares
+/// equal and no enrolled board needs re-enrolling.
+fn read_words(core: &mut Core<'_>, addresses: &[u64], name: &str) -> Result<String> {
+    let mut out = String::with_capacity(addresses.len() * 8);
+    for (i, &address) in addresses.iter().enumerate() {
+        let word = core
+            .read_word_32(address)
+            .with_context(|| format!("failed to read {name}[{i}] at {address:#x}"))?;
+        out.push_str(&format!("{word:08x}"));
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -423,6 +455,9 @@ mod tests {
         }
     }
 
+    /// Doubles as the guard on the STM32G0 arm's narrowness: `UID_BASE` is
+    /// per-family on STM32, so an F4 part must still reach the named error
+    /// rather than inheriting G0's address.
     #[test]
     fn unrecognized_chip_is_a_named_error_not_a_guess() {
         assert_eq!(
@@ -430,6 +465,42 @@ mod tests {
             None,
             "STM32F407VG should fall through to the unrecognized-chip error arm"
         );
+        assert_eq!(classify_chip("STM32H743ZI"), None);
+        assert_eq!(classify_chip("STM32L476RG"), None);
+    }
+
+    #[test]
+    fn stm32g0_parts_get_the_uid_triple_whatever_the_package() {
+        // The two this repo's own boards resolve to (chargerito_core and
+        // nucleo_g0b1re both map through Zephyr's `stm32g0b1xx`), plus a
+        // lowercase spelling, since callers pass probe-rs's casing and
+        // Zephyr's interchangeably.
+        assert_eq!(classify_chip("STM32G0B1VE"), Some(ChipFamily::Stm32G0Uid));
+        assert_eq!(classify_chip("STM32G0B1RE"), Some(ChipFamily::Stm32G0Uid));
+        assert_eq!(classify_chip("stm32g031k8"), Some(ChipFamily::Stm32G0Uid));
+    }
+
+    /// The compatibility promise in `read_words`'s doc comment: a two-word
+    /// read still produces exactly the 16-hex-digit string already sitting in
+    /// `enrollment.toml` for every enrolled Nordic board, so widening the
+    /// helper cannot silently invalidate an enrollment.
+    #[test]
+    fn two_word_ids_keep_their_existing_sixteen_digit_shape() {
+        let rendered: String =
+            [0x2f77_b9c3u32, 0xf85b_29e9].iter().map(|w| format!("{w:08x}")).collect();
+        assert_eq!(rendered, "2f77b9c3f85b29e9");
+        assert_eq!(rendered.len(), 16);
+    }
+
+    /// A three-word ID is 24 digits — checked so the STM32 arm's output
+    /// width is a stated fact rather than an accident of the loop.
+    #[test]
+    fn three_word_ids_render_twenty_four_digits() {
+        let rendered: String = [0x0000_0001u32, 0x0000_0002, 0x0000_0003]
+            .iter()
+            .map(|w| format!("{w:08x}"))
+            .collect();
+        assert_eq!(rendered, "000000010000000200000003");
     }
 
     #[test]
