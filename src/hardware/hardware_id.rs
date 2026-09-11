@@ -47,8 +47,18 @@ enum ChipFamily {
 /// classic `starts_with("nRF5")` arm the way a name one character off used
 /// to (that arm matches `"nRF54..."` too, since `"nRF54"` starts with
 /// `"nRF5"`). `embarch-core`'s `flash_backend.rs` makes the same
-/// case-insensitive `nrf54l` decision for the same reason, one repo over,
-/// and **it stops at nRF54L as well.**
+/// case-insensitive `nrf54l` decision for the same reason, one repo over.
+///
+/// **It does not, however, stop where this function stops, and this comment
+/// used to say it did.** `embarch-core`'s `requires_vendor_tool` matches
+/// `nrf54h` as well (its decision 49), because an unmatched nRF54H name was
+/// falling through to `false` and reaching probe-rs unannounced. Both repos
+/// refuse nRF54H, in opposite directions: this function abstains (`None`,
+/// "I cannot say which register pair holds its ID"), while
+/// `requires_vendor_tool` positively asserts ("keep probe-rs away"). The
+/// two matchers stay separate on purpose — see topology decision 25 and
+/// `tasks/suite/024` — because they answer different questions and share no
+/// return type that serves both.
 ///
 /// **nRF54H returns `None` on purpose, and it is checked before the classic
 /// prefix so it cannot reach either register pair by accident.** Decision
