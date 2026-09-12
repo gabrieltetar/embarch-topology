@@ -5,8 +5,9 @@
 //! number can't. Formerly `embarch-core`'s own `hardware_id.rs`, moved here
 //! unchanged (decisions 2, 4).
 //!
-//! Only the two chip families this suite's real hardware actually uses are
-//! implemented. An unrecognized chip is a named error, never a guess.
+//! Only the chip families this suite's real hardware actually uses are
+//! implemented — Nordic (classic and nRF54L), Espressif ESP32-C5, and
+//! STM32G0. An unrecognized chip is a named error, never a guess.
 
 use anyhow::{Context, Result};
 use probe_rs::{Core, MemoryInterface};
@@ -166,9 +167,11 @@ pub enum SelfReportedIdentity {
 /// whose bytes and their order are a per-SoC *driver* decision. They describe
 /// the same silicon; they need not spell it the same way.
 ///
-/// **`esp32c5` has a declared relation; nothing else does.** An arm here is
-/// only writable when the transform is *derivable*, not guessed — and for
-/// this part it is, because both sides turn out to read the identical two
+/// **Two chip families have a declared relation: `esp32c5`, and the Nordic
+/// families [`is_nordic_deviceid_chip`] recognizes.** An arm here is only
+/// writable when the transform is *derivable*, not guessed.
+///
+/// For `esp32c5` it is, because both sides turn out to read the identical two
 /// registers. Zephyr's `hwinfo_esp32.c` ESP32-C5 branch reads
 /// `EFUSE_RD_MAC_SYS0_REG`/`EFUSE_RD_MAC_SYS1_REG`, which resolve to
 /// `0x600B4800 + 0x44`/`+ 0x48` — [`ESP32C5_EFUSE_MAC_SYS0`] and
@@ -177,9 +180,20 @@ pub enum SelfReportedIdentity {
 /// deterministic, lossy projection of the JTAG-read pair, and
 /// [`esp32c5_expected_self_report`] is it.
 ///
+/// For the Nordic classic and nRF54L families it is derivable the same way —
+/// both sides read the same `DEVICEID` pair, one directly and one through
+/// Zephyr's `hwinfo_nrf.c` — and [`nordic_expected_self_report`]'s own doc
+/// comment states that derivation in full (topology decision 21). **That
+/// relation is declared and derived, not verified across the family it
+/// covers**: decision 21's silicon evidence is nRF54L15 only, and
+/// `open.md` records that `nRF54L10`/`nRF54L05`/`nRF54LM20A` take this same
+/// arm with no silicon ever attached, and that the DUT's own readback has no
+/// independent corroboration. A declared relation and a family-wide
+/// confirmation are different claims; only the first is made here.
+///
 /// Every other chip returns [`SelfReportedIdentity::Undeclared`], which is
 /// **not** a pass: a comparison that could not be made is not a comparison
-/// that succeeded. Writing an arm for one requires the same thing this one
+/// that succeeded. Writing an arm for one requires the same thing these two
 /// had — both implementations' actual register reads, in view at once.
 pub fn compare_self_reported(chip: &str, jtag_read: &str, self_reported: &str) -> SelfReportedIdentity {
     if self_reported.is_empty() {
