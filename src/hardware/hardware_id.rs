@@ -426,7 +426,7 @@ mod tests {
 
     #[test]
     fn a_different_esp32c5_board_on_the_link_is_a_mismatch() {
-        // The whole point of decision 35: the runtime serial link and the
+        // The whole point of `embarch-core` decision 35: the runtime serial link and the
         // JTAG connection are physically separate USB devices, so this is
         // what "two different boards" looks like from Core.
         let (jtag, _) = esp32c5_pair(0x1234_5678, 0xa5a5_9abc);
