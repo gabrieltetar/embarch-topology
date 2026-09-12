@@ -9,10 +9,13 @@
 //! actual enforcement — the live hardware-ID readback-and-compare that makes
 //! it worth trusting — is `validate.rs`.
 
+#[cfg(feature = "hardware")]
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "hardware")]
 use std::path::Path;
 
+#[cfg(feature = "hardware")]
 use super::paths;
 
 /// One enrolled probe↔board association. `hardware_id` is the target chip's
@@ -73,6 +76,7 @@ pub struct EnrolledBoard {
 /// a declared fact about what is physically wired to what, which no
 /// detection can produce.
 #[derive(Debug, Default, Serialize, Deserialize)]
+#[cfg(feature = "hardware")]
 pub struct Store {
     #[serde(default)]
     pub boards: Vec<EnrolledBoard>,
@@ -82,6 +86,7 @@ pub struct Store {
     pub signals: Vec<super::signal::SignalLink>,
 }
 
+#[cfg(feature = "hardware")]
 pub fn now_utc_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -89,6 +94,7 @@ pub fn now_utc_ms() -> u64 {
         .as_millis() as u64
 }
 
+#[cfg(feature = "hardware")]
 fn load_at(path: &Path) -> Result<Store> {
     if !path.exists() {
         return Ok(Store::default());
@@ -99,6 +105,7 @@ fn load_at(path: &Path) -> Result<Store> {
         .with_context(|| format!("failed to parse enrollment file at {}", path.display()))
 }
 
+#[cfg(feature = "hardware")]
 fn save_at(path: &Path, store: &Store) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -111,6 +118,7 @@ fn save_at(path: &Path, store: &Store) -> Result<()> {
 
 /// The whole store, for callers that own one of its tables
 /// ([`super::signal`]). Board-only callers use [`list`]/[`find`] instead.
+#[cfg(feature = "hardware")]
 pub fn load_store() -> Result<Store> {
     load_at(&paths::enrollment_path()?)
 }
@@ -118,12 +126,14 @@ pub fn load_store() -> Result<Store> {
 /// Writes the whole store back. Pairs with [`load_store`]: a caller that
 /// edits one table must round-trip the other untouched, which is why neither
 /// side ever writes a `Store` it didn't just load.
+#[cfg(feature = "hardware")]
 pub fn save_store(store: &Store) -> Result<()> {
     save_at(&paths::enrollment_path()?, store)
 }
 
 /// Look up a probe's enrollment by serial number. `Ok(None)` is a normal
 /// "not enrolled yet" outcome, not an error.
+#[cfg(feature = "hardware")]
 pub fn find(probe_serial: &str) -> Result<Option<EnrolledBoard>> {
     let store = load_at(&paths::enrollment_path()?)?;
     Ok(store.boards.into_iter().find(|b| b.probe_serial == probe_serial))
@@ -137,12 +147,14 @@ pub fn find(probe_serial: &str) -> Result<Option<EnrolledBoard>> {
 /// More than one entry sharing `role` returns the first (by file order)
 /// rather than erroring — a soft, best-effort lookup, not `validate.rs`'s
 /// fail-closed identity gate.
+#[cfg(feature = "hardware")]
 pub fn find_by_role(role: &str) -> Result<Option<EnrolledBoard>> {
     let store = load_at(&paths::enrollment_path()?)?;
     Ok(store.boards.into_iter().find(|b| b.role == role))
 }
 
 /// Every currently-enrolled board — the topology UI/CLI's own listing.
+#[cfg(feature = "hardware")]
 pub fn list() -> Result<Vec<EnrolledBoard>> {
     Ok(load_at(&paths::enrollment_path()?)?.boards)
 }
@@ -170,6 +182,7 @@ pub fn list() -> Result<Vec<EnrolledBoard>> {
 /// returned rather than dropped silently: replacing one board with another
 /// under the same name is exactly the kind of thing a caller should be able
 /// to say out loud. `Ok(None)` means nothing was displaced.
+#[cfg(feature = "hardware")]
 pub fn upsert(board: EnrolledBoard) -> Result<Option<EnrolledBoard>> {
     upsert_at(&paths::enrollment_path()?, board)
 }
@@ -179,6 +192,7 @@ pub fn upsert(board: EnrolledBoard) -> Result<Option<EnrolledBoard>> {
 /// re-implemented in a test against a temp file — the shape three tests in
 /// this module were already in, and precisely why nobody noticed the rule
 /// was missing.
+#[cfg(feature = "hardware")]
 fn upsert_at(path: &Path, board: EnrolledBoard) -> Result<Option<EnrolledBoard>> {
     let mut store = load_at(path)?;
 
@@ -204,6 +218,7 @@ fn upsert_at(path: &Path, board: EnrolledBoard) -> Result<Option<EnrolledBoard>>
 /// row, it never creates one on its own, so there's always a `probe_serial`/
 /// `chip`/`hardware_id` on record for whatever role this link serial gets
 /// attached to.
+#[cfg(feature = "hardware")]
 pub fn set_link_port_serial(role: &str, serial: &str) -> Result<()> {
     amend(role, |board| board.link_port_serial = Some(serial.to_string()))
 }
@@ -213,6 +228,7 @@ pub fn set_link_port_serial(role: &str, serial: &str) -> Result<()> {
 /// nRF54L15DK case that forced this). Same contract as
 /// [`set_link_port_serial`]: `role` must already be enrolled, and this only
 /// ever amends that row.
+#[cfg(feature = "hardware")]
 pub fn set_link_port_interface(role: &str, interface: u8) -> Result<()> {
     amend(role, |board| board.link_port_interface = Some(interface))
 }
@@ -224,17 +240,20 @@ pub fn set_link_port_interface(role: &str, interface: u8) -> Result<()> {
 /// exists, and there was previously no way to clear it short of hand-editing
 /// `enrollment.toml`. `role` must already be enrolled, same contract as
 /// [`set_link_port_serial`].
+#[cfg(feature = "hardware")]
 pub fn clear_link_port_serial(role: &str) -> Result<()> {
     amend(role, |board| board.link_port_serial = None)
 }
 
 /// Unsets `role`'s declared link port interface. Same contract and rationale
 /// as [`clear_link_port_serial`], for [`EnrolledBoard::link_port_interface`].
+#[cfg(feature = "hardware")]
 pub fn clear_link_port_interface(role: &str) -> Result<()> {
     amend(role, |board| board.link_port_interface = None)
 }
 
 /// The shared body of the two `set_link_port_*` functions above.
+#[cfg(feature = "hardware")]
 fn amend(role: &str, f: impl FnOnce(&mut EnrolledBoard)) -> Result<()> {
     let path = paths::enrollment_path()?;
     let mut store = load_at(&path)?;
@@ -247,7 +266,7 @@ fn amend(role: &str, f: impl FnOnce(&mut EnrolledBoard)) -> Result<()> {
     save_at(&path, &store)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "hardware"))]
 mod tests {
     use super::*;
     use std::path::PathBuf;

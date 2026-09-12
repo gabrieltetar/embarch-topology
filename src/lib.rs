@@ -32,11 +32,18 @@
 #[cfg(feature = "software")]
 pub mod software;
 
-#[cfg(feature = "hardware")]
+/// Gated on `hardware` **or** `wire`: under `wire` alone this module compiles
+/// to its plain data types only — the facts Core serves over HTTP — with every
+/// function that reads a probe, enumerates a serial port or touches
+/// `enrollment.toml` cfg'd out (decision 31). That is what lets a consumer
+/// which must never link `probe-rs`/`serialport` still name the types, instead
+/// of hand-maintaining a mirror the compiler cannot compare against anything.
+#[cfg(any(feature = "hardware", feature = "wire"))]
 pub mod hardware;
 
 /// Whether this process is running inside a WSL2 guest. Unconditionally
 /// compiled (no feature gate) — zero dependencies beyond `std`, so both
 /// halves above can use it without either pulling in the other's
 /// dependencies (`wsl2`'s own doc comment; `embarch-topology` decision 27).
+#[cfg(any(feature = "software", feature = "hardware"))]
 mod wsl2;

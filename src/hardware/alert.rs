@@ -19,11 +19,15 @@
 //! same durable log. [`fix_it_url`] is now a fixed URL into that UI's
 //! Topology tab — no marker, no discovery, nothing to go stale.
 
+#[cfg(feature = "hardware")]
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "hardware")]
 use std::io::Write;
 
+#[cfg(feature = "hardware")]
 use super::enrollment::EnrolledBoard;
+#[cfg(feature = "hardware")]
 use super::paths;
 
 /// Where `embarch-ui` binds by default (`embarch-ui`'s own `BIND_ADDR`/
@@ -57,6 +61,10 @@ pub struct Alert {
 }
 
 impl Alert {
+    /// Behind `hardware`: it stamps `occurred_at_utc_ms` from the local clock,
+    /// which only the process that *detects* a mismatch has any business
+    /// doing. A `wire`-only consumer deserializes alerts Core already raised.
+    #[cfg(feature = "hardware")]
     pub fn new(known: &EnrolledBoard, live_hardware_id: Option<String>, reason: String) -> Self {
         let occurred_at_utc_ms = super::enrollment::now_utc_ms();
         Alert {
@@ -74,6 +82,7 @@ impl Alert {
 
 /// Append one alert to the durable log, unconditionally — the only thing
 /// that happens to an alert now that decision 19 retired the live push.
+#[cfg(feature = "hardware")]
 pub fn record(alert: &Alert) -> Result<()> {
     let path = paths::alert_log_path()?;
     if let Some(parent) = path.parent() {
@@ -93,6 +102,7 @@ pub fn record(alert: &Alert) -> Result<()> {
 /// topology UI's own "recent mismatches" listing, and what it loads on
 /// startup so a mismatch caught while the UI wasn't running is still there
 /// to see, not lost to bad timing (decision 12).
+#[cfg(feature = "hardware")]
 pub fn recent(limit: usize) -> Result<Vec<Alert>> {
     let path = paths::alert_log_path()?;
     if !path.exists() {
@@ -131,11 +141,12 @@ pub fn recent(limit: usize) -> Result<Vec<Alert>> {
 ///
 /// Opening or focusing the UI is still the caller's job, never this crate's
 /// (decision 12) — this only says where.
+#[cfg(feature = "hardware")]
 pub fn fix_it_url() -> String {
     format!("http://{UI_HOST}:{UI_PORT}/#topology")
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "hardware"))]
 mod tests {
     use super::*;
 

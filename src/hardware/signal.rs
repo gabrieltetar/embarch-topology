@@ -31,10 +31,13 @@
 //! a signal fanning out to two destinations, for a signal between two DUTs,
 //! or for driving a `HostToDut` stimulus line. None of those are real yet.
 
+#[cfg(feature = "hardware")]
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "hardware")]
 use super::enrollment;
+#[cfg(feature = "hardware")]
 use super::port::{self, DetectedPort, Filter};
 
 /// A named signal originating at a board, with a declared route that may
@@ -149,12 +152,14 @@ impl std::fmt::Display for SignalNotDeclared {
 impl std::error::Error for SignalNotDeclared {}
 
 /// Every declared signal.
+#[cfg(feature = "hardware")]
 pub fn list() -> Result<Vec<SignalLink>> {
     Ok(enrollment::load_store()?.signals)
 }
 
 /// Look up one declared signal by name. `Ok(None)` is a normal "not declared
 /// yet" outcome, not an error.
+#[cfg(feature = "hardware")]
 pub fn find(name: &str) -> Result<Option<SignalLink>> {
     Ok(enrollment::load_store()?.signals.into_iter().find(|s| s.name == name))
 }
@@ -164,6 +169,7 @@ pub fn find(name: &str) -> Result<Option<SignalLink>> {
 /// stale duplicates that could disagree about where the wire goes. That
 /// overwrite *is* the migration path decision 18 promises: moving the
 /// outpost onto dev-bench pins is one call here, not a redesign.
+#[cfg(feature = "hardware")]
 pub fn declare(link: SignalLink) -> Result<()> {
     if link.name.trim().is_empty() {
         anyhow::bail!("a signal needs a name; it is what a Study taps it by");
@@ -176,6 +182,7 @@ pub fn declare(link: SignalLink) -> Result<()> {
 
 /// Removes a declared signal. `Ok(false)` if nothing was declared under that
 /// name — removing something that isn't there isn't a failure.
+#[cfg(feature = "hardware")]
 pub fn remove(name: &str) -> Result<bool> {
     let mut store = enrollment::load_store()?;
     let before = store.signals.len();
@@ -200,12 +207,14 @@ pub fn remove(name: &str) -> Result<bool> {
 /// [`port::detect`](super::port::detect). Asking for one returns a
 /// [`SignalMismatch`] naming that rather than guessing at dev-bench's port
 /// on the caller's behalf.
+#[cfg(feature = "hardware")]
 pub fn resolve_port(name: &str) -> Result<DetectedPort> {
     let link = find(name)?
         .ok_or_else(|| anyhow::Error::new(SignalNotDeclared { name: name.to_string() }))?;
     resolve_link_port(&link)
 }
 
+#[cfg(feature = "hardware")]
 fn resolve_link_port(link: &SignalLink) -> Result<DetectedPort> {
     let port_serial = match &link.route {
         Route::Direct { port_serial } => port_serial,
@@ -253,6 +262,7 @@ fn resolve_link_port(link: &SignalLink) -> Result<DetectedPort> {
 /// [`validate_role`](super::validate_role)'s job, not this one's. Asserting
 /// anything more would be re-checking dev-bench through a second, weaker
 /// path.
+#[cfg(feature = "hardware")]
 pub fn validate(name: &str) -> Result<SignalLink> {
     let link = find(name)?
         .ok_or_else(|| anyhow::Error::new(SignalNotDeclared { name: name.to_string() }))?;
@@ -265,7 +275,7 @@ pub fn validate(name: &str) -> Result<SignalLink> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "hardware"))]
 mod tests {
     use super::*;
     use serialport::{SerialPortInfo, SerialPortType, UsbPortInfo};

@@ -30,10 +30,13 @@
 //! handshake is each consumer's job (`embarch-core`'s `study.rs`, e.g.); this
 //! module just answers "which port is it?".
 
+#[cfg(feature = "hardware")]
 use anyhow::{bail, Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "hardware")]
 use serialport::{SerialPortInfo, SerialPortType};
 
+#[cfg(feature = "hardware")]
 use super::enrollment;
 
 /// SEGGER's USB vendor ID — every on-board J-Link (and every standalone one)
@@ -61,6 +64,7 @@ pub const SILABS_VID: u16 = 0x10C4;
 
 /// Default product-string needle, in `normalize`d form. Matches both
 /// Linux's bare `J-Link` and Windows' `JLink CDC UART Port` friendly name.
+#[cfg(feature = "hardware")]
 pub const DEFAULT_PRODUCT_NEEDLE: &str = "jlink";
 
 /// The enrollment `role` treated as "this entry is dev-bench" for
@@ -73,7 +77,7 @@ pub const DEV_BENCH_ROLE: &str = "dev-bench";
 /// `Route::Direct` (decision 18) resolves through the same
 /// machinery and gets the same shape back, which is why the type now has a
 /// neutral name and [`DevBenchPort`] is an alias rather than a second type.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DetectedPort {
     pub port_name: String,
     /// One of four values. `"segger-vid-match"` or `"silabs-vid-match"` when
@@ -102,7 +106,12 @@ pub struct DetectedPort {
     /// `no_vid_gate` regime the VID played no discriminating role at all
     /// (any vendor was eligible), so it is never credited there — including
     /// when the declared serial happens to also be a known-VID device.
-    pub detected_by: &'static str,
+    ///
+    /// `String` rather than `&'static str` since decision 31: this type is
+    /// now deserializable behind the `wire` feature, and a borrowed-static
+    /// field cannot be. Every value it holds is still one of the four
+    /// constants below.
+    pub detected_by: String,
     pub vendor_id: Option<u16>,
     pub product_id: Option<u16>,
     pub serial_number: Option<String>,
@@ -136,6 +145,7 @@ pub type DevBenchPort = DetectedPort;
 /// this is a distinct value rather than a VID-match string or [`ENUMERATED`]).
 pub const DECLARED_SERIAL: &str = "declared-serial";
 
+#[cfg(feature = "hardware")]
 fn detected_by_for_vid(vid: u16) -> &'static str {
     match vid {
         SEGGER_VID => "segger-vid-match",
@@ -277,6 +287,7 @@ impl std::error::Error for NotFound {}
 /// this any more — the only source for `serial`/`serial_is_fallback` is
 /// [`Filter::resolve`]'s enrollment lookup.
 #[derive(Debug, Default, Clone)]
+#[cfg(feature = "hardware")]
 pub struct Filter {
     pub serial: Option<String>,
     pub product_needle: Option<String>,
@@ -303,6 +314,7 @@ pub struct Filter {
     pub no_vid_gate: bool,
 }
 
+#[cfg(feature = "hardware")]
 impl Filter {
     /// Always `DEFAULT_PRODUCT_NEEDLE`, with `known_boards`'s successor
     /// (`super::enrollment::find_by_role`) as the only serial source, via the
@@ -377,6 +389,7 @@ impl Filter {
 
 /// Lowercase, alphanumerics only — lets one default needle cover every
 /// spelling of the same probe across platforms.
+#[cfg(feature = "hardware")]
 fn normalize(s: &str) -> String {
     s.chars()
         .filter(|c| c.is_ascii_alphanumeric())
@@ -384,6 +397,7 @@ fn normalize(s: &str) -> String {
         .collect()
 }
 
+#[cfg(feature = "hardware")]
 fn as_candidate(info: &SerialPortInfo) -> Option<DetectedPort> {
     let SerialPortType::UsbPort(usb) = &info.port_type else {
         return None;
@@ -391,7 +405,7 @@ fn as_candidate(info: &SerialPortInfo) -> Option<DetectedPort> {
 
     Some(DetectedPort {
         port_name: info.port_name.clone(),
-        detected_by: detected_by_for_vid(usb.vid),
+        detected_by: detected_by_for_vid(usb.vid).to_string(),
         vendor_id: Some(usb.vid),
         product_id: Some(usb.pid),
         serial_number: usb.serial_number.clone(),
@@ -404,6 +418,7 @@ fn as_candidate(info: &SerialPortInfo) -> Option<DetectedPort> {
 /// Applies the VID + serial/product/interface rules to an already-enumerated
 /// port list. Split out from [`detect`] so the whole heuristic is
 /// unit-testable with no hardware involved.
+#[cfg(feature = "hardware")]
 pub fn select(ports: &[SerialPortInfo], filter: &Filter) -> Result<DetectedPort> {
     let mut candidates: Vec<DetectedPort> = ports
         .iter()
@@ -419,7 +434,7 @@ pub fn select(ports: &[SerialPortInfo], filter: &Filter) -> Result<DetectedPort>
             // Overwritten here rather than in `as_candidate`, which has no
             // `Filter` to consult (`embarch-topology` decision 24).
             if filter.no_vid_gate {
-                c.detected_by = DECLARED_SERIAL;
+                c.detected_by = DECLARED_SERIAL.to_string();
             }
             c
         })
@@ -544,6 +559,7 @@ pub fn select(ports: &[SerialPortInfo], filter: &Filter) -> Result<DetectedPort>
     Ok(candidates.remove(0))
 }
 
+#[cfg(feature = "hardware")]
 fn describe(candidates: &[DetectedPort]) -> String {
     candidates
         .iter()
@@ -568,6 +584,7 @@ fn describe(candidates: &[DetectedPort]) -> String {
 /// enrollment file read `Filter::resolve` does) — callers on an async
 /// runtime should run this via `spawn_blocking`, same as `embarch-core`
 /// already does for every other hardware-touching call.
+#[cfg(feature = "hardware")]
 pub fn detect() -> Result<DevBenchPort> {
     let filter = Filter::resolve()?;
     let ports = serialport::available_ports().context("failed to enumerate serial ports")?;
@@ -610,6 +627,7 @@ pub const ENUMERATED: &str = "enumerated";
 ///
 /// Blocking, same as [`detect`] — call via `spawn_blocking` on an async
 /// runtime.
+#[cfg(feature = "hardware")]
 pub fn enumerate() -> Result<Vec<DetectedPort>> {
     let ports = serialport::available_ports().context("failed to enumerate serial ports")?;
     Ok(enumerate_in(&ports))
@@ -617,12 +635,13 @@ pub fn enumerate() -> Result<Vec<DetectedPort>> {
 
 /// [`enumerate`]'s pure half, split out for the same reason [`select`] is:
 /// the shape of the answer is testable with no hardware attached.
+#[cfg(feature = "hardware")]
 pub fn enumerate_in(ports: &[SerialPortInfo]) -> Vec<DetectedPort> {
     let mut out: Vec<DetectedPort> = ports
         .iter()
         .filter_map(as_candidate)
         .map(|mut p| {
-            p.detected_by = ENUMERATED;
+            p.detected_by = ENUMERATED.to_string();
             p
         })
         .collect();
@@ -630,7 +649,7 @@ pub fn enumerate_in(ports: &[SerialPortInfo]) -> Vec<DetectedPort> {
     out
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "hardware"))]
 mod tests {
     use super::*;
     use serialport::UsbPortInfo;
