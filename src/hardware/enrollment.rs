@@ -24,6 +24,8 @@ pub struct EnrolledBoard {
     pub probe_serial: String,
     pub role: String,
     pub chip: String,
+    /// The probe-read (JTAG) hardware ID — not the bench's self-reported
+    /// one. `embarch-core` decision 56.
     pub hardware_id: String,
     /// UTC milliseconds since the epoch.
     pub confirmed_at_utc_ms: u64,
