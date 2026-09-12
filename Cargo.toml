@@ -99,3 +99,8 @@ bin = ["hardware", "software", "dep:clap", "dep:tracing-subscriber"]
 
 [dev-dependencies]
 tokio = { version = "1.53.0", features = ["rt-multi-thread", "macros"] }
+# For the `wire`-only deserialization tests (`port.rs::wire_tests`, 2026-09-12).
+# The runtime `serde_json` above is optional and pulled in by `hardware`, so a
+# `--no-default-features --features wire` test run — the configuration
+# `embarch-core-client` actually builds in — has no JSON codec without this.
+serde_json = "1.0.150"

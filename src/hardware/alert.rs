@@ -45,7 +45,11 @@ use super::paths;
 pub const UI_HOST: &str = "127.0.0.1";
 pub const UI_PORT: u16 = 4890;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+// `PartialEq` since 2026-09-12 (`suite/035`): `embarch-core-client`'s retired
+// `AlertResponse` mirror carried it, and its callers compare alerts for
+// equality. Deriving it here is what let that mirror be deleted rather than
+// kept alive for one derive.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Alert {
     /// Millisecond timestamp plus the process ID that raised it — unique
     /// enough for a local alert log with no real concurrency to speak of,
