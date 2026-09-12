@@ -52,6 +52,11 @@ tokio = { version = "1.53.0", features = ["rt", "macros", "sync", "time"], optio
 # hardware half rather than force it on every consumer).
 probe-rs = { version = "0.31", optional = true }
 serialport = { version = "4.9.0", features = ["usbportinfo-interface"], optional = true }
+# ---- feature-gated under `wire`, which `hardware` implies. `serde` used to
+# be listed under `hardware` alongside probe-rs/serialport, which is what made
+# the wire types unreachable without the machinery that produces them: every
+# consumer that wanted to *read* an enrolled board, an alert, a detected port
+# or a signal route had to hand-mirror it instead (decision 31).
 serde = { version = "1.0.228", features = ["derive"], optional = true }
 toml = { version = "1.1", optional = true }
 # The alert log (`hardware::alert`) is JSON-lines and needs this under
@@ -76,7 +81,15 @@ software = ["dep:reqwest", "dep:tokio"]
 # detection, chip hardware-ID readback, enrollment storage, validate()) —
 # needs probe-rs/serialport, so it's opt-in. embarch-core is the one
 # consumer that enables it.
-hardware = ["dep:probe-rs", "dep:serialport", "dep:serde", "dep:toml", "dep:serde_json"]
+hardware = ["wire", "dep:probe-rs", "dep:serialport", "dep:toml", "dep:serde_json"]
+# The wire types the hardware half produces — `EnrolledBoard`, `Alert`,
+# `DetectedPort`, `SignalLink`, `Route`, `SignalDirection` — and nothing that
+# reads a probe or a serial port. Pure serde, no `probe-rs`, no `serialport`,
+# no C toolchain. `hardware` implies it, so `embarch-core` is unaffected; what
+# it buys is that a consumer forbidden from linking probe-rs (decision 31 —
+# `embarch-api`'s `embarch-core-client`, `embarch-ui`, `embarch-umbrella`) can
+# name the very types Core serves rather than hand-mirroring them.
+wire = ["dep:serde"]
 # This crate's own CLI binary. Implies both halves (the whole point of the
 # binary is to run the identical validation/enrollment logic Core runs,
 # decision 8, plus report software topology like `doctor`

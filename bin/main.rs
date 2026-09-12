@@ -284,7 +284,7 @@ mod tests {
     fn port() -> hardware::DetectedPort {
         hardware::DetectedPort {
             port_name: "COM16".into(),
-            detected_by: "segger-vid-match",
+            detected_by: "segger-vid-match".to_string(),
             vendor_id: Some(0x1366),
             product_id: Some(0x1069),
             serial_number: Some("001050288460".into()),
