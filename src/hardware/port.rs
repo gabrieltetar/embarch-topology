@@ -77,7 +77,10 @@ pub const DEV_BENCH_ROLE: &str = "dev-bench";
 /// `Route::Direct` (decision 18) resolves through the same
 /// machinery and gets the same shape back, which is why the type now has a
 /// neutral name and [`DevBenchPort`] is an alias rather than a second type.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+// `PartialEq, Eq` since 2026-09-12 (`suite/035`): `embarch-core-client`'s
+// retired `SerialPortResponse` mirror carried both, and its callers compare
+// ports for equality. Every field is `Eq` already.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DetectedPort {
     pub port_name: String,
     /// One of four values. `"segger-vid-match"` or `"silabs-vid-match"` when
@@ -129,6 +132,12 @@ pub struct DetectedPort {
     /// and answers nothing — says nothing about a port having been chosen at
     /// all. A caller that can see this field can say "COM16, guessed among
     /// 2" instead of "COM16".
+    /// No `#[serde(default)]` beside `skip_serializing_if`, and that is
+    /// correct rather than an oversight: `serde` derives a missing `Option`
+    /// field to `None` on its own, so the asymmetric-looking attribute round
+    /// trips fine. `wire_tests::a_determined_port_round_trips_without_its_
+    /// guess_field` pins it, written 2026-09-12 (`suite/035`) when this type
+    /// first became something an outside crate deserializes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub guessed_among: Option<usize>,
 }
@@ -647,6 +656,54 @@ pub fn enumerate_in(ports: &[SerialPortInfo]) -> Vec<DetectedPort> {
         .collect();
     out.sort_by(|a, b| a.port_name.cmp(&b.port_name));
     out
+}
+
+/// Tests that need only the `wire` half — the deserialization contract a
+/// consumer forbidden from linking `probe-rs`/`serialport` depends on
+/// (`embarch-core-client`, since `suite/035`). Kept separate from the
+/// `hardware`-gated module below so they actually run in the configuration
+/// that has the bug: `cargo test --no-default-features --features wire`.
+#[cfg(all(test, feature = "wire"))]
+mod wire_tests {
+    use super::*;
+
+    /// A determined port is serialized **without** `guessed_among`
+    /// (`skip_serializing_if`), so the interesting question is whether it
+    /// reads back. It does — `serde` defaults a missing `Option` to `None`
+    /// with no `#[serde(default)]` needed. Written 2026-09-12 because
+    /// `suite/035` guessed the opposite, and a guess about a serde attribute
+    /// is exactly the kind of thing that gets written into a doc comment as
+    /// fact. It is cheap to keep, and it is now the thing that would notice
+    /// if `skip_serializing_if` ever moved to a non-`Option` field.
+    #[test]
+    fn a_determined_port_round_trips_without_its_guess_field() {
+        let port = DetectedPort {
+            port_name: "COM17".to_string(),
+            detected_by: DECLARED_SERIAL.to_string(),
+            vendor_id: Some(0x1366),
+            product_id: Some(0x1059),
+            serial_number: Some("001057729826".to_string()),
+            product: Some("J-Link".to_string()),
+            interface: Some(2),
+            guessed_among: None,
+        };
+        let json = serde_json::to_string(&port).unwrap();
+        assert!(!json.contains("guessed_among"), "{json}");
+        assert_eq!(serde_json::from_str::<DetectedPort>(&json).unwrap(), port);
+    }
+
+    /// The guessed case still carries the field both ways — the `default`
+    /// added above must not swallow a real value.
+    #[test]
+    fn a_guessed_port_keeps_its_candidate_count() {
+        let json = concat!(
+            r#"{"port_name":"COM16","detected_by":"segger-vid-match","#,
+            r#""vendor_id":4966,"product_id":4185,"serial_number":null,"#,
+            r#""product":null,"interface":0,"guessed_among":2}"#
+        );
+        let port: DetectedPort = serde_json::from_str(json).unwrap();
+        assert_eq!(port.guessed_among, Some(2));
+    }
 }
 
 #[cfg(all(test, feature = "hardware"))]
