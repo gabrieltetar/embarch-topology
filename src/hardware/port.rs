@@ -76,15 +76,20 @@ pub const DEV_BENCH_ROLE: &str = "dev-bench";
 #[derive(Debug, Clone, Serialize)]
 pub struct DetectedPort {
     pub port_name: String,
-    /// One of four values. `"segger-vid-match"`, `"espressif-vid-match"` or
-    /// `"silabs-vid-match"` when [`select`] ran with its VID gate on
-    /// (`Filter::no_vid_gate` false — dev-bench's own resolution, decision 17)
-    /// and that gate is what stood between the candidate and every other
-    /// serial device on the machine. [`DECLARED_SERIAL`] when the gate was
-    /// off instead (`Filter::for_declared_serial`, decision 18) — a directly
-    /// declared USB serial identified the candidate, and any VID at all was
-    /// eligible. [`ENUMERATED`] when [`enumerate`] ran and nothing narrowed
-    /// the candidate at all. No `"env-override"` variant any more (see this
+    /// One of four values. `"segger-vid-match"` or `"silabs-vid-match"` when
+    /// [`select`] ran with its VID gate on (`Filter::no_vid_gate` false —
+    /// dev-bench's own resolution, decision 17) and that gate is what stood
+    /// between the candidate and every other serial device on the machine —
+    /// [`ESPRESSIF_VID`] is not one of the two the gate admits (its own doc
+    /// comment says why), so `"espressif-vid-match"` is never actually
+    /// produced; [`detected_by_for_vid`] still returns it for that VID
+    /// because the gate, not this function, is what excludes Espressif, and
+    /// the string stays a faithful name for the value if that ever changes.
+    /// [`DECLARED_SERIAL`] when the gate was off instead
+    /// (`Filter::for_declared_serial`, decision 18) — a directly declared USB
+    /// serial identified the candidate, and any VID at all was eligible.
+    /// [`ENUMERATED`] when [`enumerate`] ran and nothing narrowed the
+    /// candidate at all. No `"env-override"` variant any more (see this
     /// module's own top doc comment).
     ///
     /// **This names which of those three regimes resolved the port, not
@@ -160,7 +165,10 @@ fn detected_by_for_vid(vid: u16) -> &'static str {
 pub enum ExcludingRule {
     /// The VID gate excluded every candidate — no port among however many
     /// the OS enumerated (`NotFound::total_ports_seen`) reported one of the
-    /// three recognized link VIDs.
+    /// two VIDs the gate admits ([`SEGGER_VID`], [`SILABS_VID`]).
+    /// [`ESPRESSIF_VID`] is a recognized *link* VID for JTAG/flashing but not
+    /// a candidate this gate ever admits (its own doc comment says why), so
+    /// it can't be the reason this variant fires.
     NoRecognizedVid,
     /// A declared serial ([`EnrolledBoard::link_port_serial`](super::enrollment::EnrolledBoard::link_port_serial),
     /// applied hard — `serial_is_fallback: false`) matched no VID-recognized
