@@ -37,7 +37,7 @@ pub struct EnrolledBoard {
     /// `None` for every other role. Exists because `probe_serial` above is
     /// the JTAG debug probe's own serial, and on real dev-bench hardware
     /// whose runtime link moved to a dedicated UART bridge chip
-    /// (`embarch-core` decision 21's port migration), that bridge
+    /// (`embarch-core` decision 27's port migration), that bridge
     /// is a *different physical USB device* with its own, unrelated serial
     /// — nothing observable over USB proves the two are the same board, so
     /// this can't be inferred the way `hardware_id` is; it's a second

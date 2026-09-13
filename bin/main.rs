@@ -144,10 +144,10 @@ fn render_error(e: &anyhow::Error) -> String {
 /// `validate` and `set-dev-bench-link` all open a probe or write
 /// `enrollment.toml`, and Core already does the identical thing under its
 /// own hardware lock (`Arc<Mutex<()>>`, in-process only per
-/// `embarch-core/decisions/platform.md:46`) — a second process calling the
+/// `embarch-core/decisions/platform.md:32`) — a second process calling the
 /// same function races Core's lock with no queue and no message
 /// (`embarch-topology/decisions/enrollment.md:15`,
-/// `embarch-core/decisions/surfaces.md:30`), and on a `wsl-host` machine
+/// `embarch-core/decisions/surfaces.md:17`), and on a `wsl-host` machine
 /// writes a *different* store than the one the Windows-service Core reads
 /// (`hardware/paths.rs`).
 ///
