@@ -42,7 +42,8 @@ const ESP32C5_EFUSE_MAC_SYS1: u64 = 0x600B_4848;
 /// pair [`read`] gets it from, and (via [`is_nordic_deviceid_chip`]) whether
 /// a self-reported ID has a derivable relation to that pair at all. One
 /// classifier decides both questions so they cannot disagree — see topology
-/// decision 22 and task `topology/007`, which this type closes.
+/// decision 25 (not 22, which is unrelated and was never right here) and
+/// task `topology/007`, which this type closes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ChipFamily {
     /// nRF54L*: `FICR.INFO.DEVICEID[0..1]`. **nRF54H is deliberately not
