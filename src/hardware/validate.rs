@@ -315,6 +315,18 @@ pub fn validate_role_timed(role: &str) -> Result<Validation> {
 /// the only sane default when there's no other way to tell which one a
 /// caller means.
 ///
+/// **This block is a hand-copy of `embarch-core::resolve_probe`
+/// (`embarch-core/src/hardware.rs`, `pub(crate)`), not a call to it — decision
+/// 32.** The two were one implementation before `embarch-core` decision 22
+/// moved the board-identity gate into this crate; `pub(crate)` cannot cross
+/// the crate boundary that move created, so this is now an independently
+/// maintained second copy of the same selection rule. Documented rather than
+/// de-duplicated: the dependency runs `embarch-topology` → `embarch-core`,
+/// not back, so this crate cannot call `embarch-core`'s copy, and the reverse
+/// (exposing this as `pub` for `embarch-core` to call) needs an edit inside
+/// `embarch-core` that is out of a topology-scoped change's reach. See
+/// decision 32 and `open.md`.
+///
 /// **This still doesn't — and structurally can't — verify that the probe a
 /// human *picked* really is the board they think it is.** Serial number and
 /// probe identifier are exactly what a same-probe-type ambiguity (decision
