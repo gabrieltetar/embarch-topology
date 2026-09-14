@@ -371,28 +371,28 @@ pub fn select_probe(
 /// core`'s `flash`/`reset` already use (that crate's decision 9), extended
 /// here so a human enrolling two visibly-different boards at once (e.g. a
 /// J-Link DUT alongside dev-bench's own ESP JTAG) doesn't have to physically
-/// isolate them one at a time just to satisfy this function — `embarch-
-/// core`'s own `GET /enroll` page's drag-and-drop UI is the first caller
-/// that needs this (decision 15). Omitted, the original
+/// isolate them one at a time just to satisfy this function — motivated by
+/// `embarch-core`'s own `GET /enroll` page's drag-and-drop UI, since retired
+/// in favor of `embarch-ui`'s Enroll surface (`embarch-core` decision 25)
+/// (decision 15). Omitted, the original
 /// behavior is unchanged: refuses anything but exactly one attached probe,
 /// the only sane default when there's no other way to tell which one a
 /// caller means.
 ///
 /// **This used to be a hand-copy of `embarch-core::resolve_probe`
-/// (`embarch-core/src/hardware.rs`, `pub(crate)`), not a call to it —
-/// decision 32.** The two were one implementation before `embarch-core`
+/// (`embarch-core/src/hardware.rs`, `pub(crate)`), not a call to it.**
+/// The two were one implementation before `embarch-core`
 /// decision 22 moved the board-identity gate into this crate; `pub(crate)`
 /// cannot cross the crate boundary that move created, so the move silently
 /// turned one shared implementation into two independently maintained
-/// copies. **That stopped being true here as of decision 33**: the
-/// selection rule is now [`select_probe`] above, a `pub` function this
-/// crate exposes specifically so `embarch-core` can call it instead of
-/// keeping its own copy — this crate still cannot call back into
-/// `embarch-core` (the dependency runs the other way), but the direction
-/// that *can* close the duplication no longer needs an edit inside
-/// `embarch-core` to begin; it needs one to finish (`tasks/core/055`,
-/// blocked on this landing). See decision 32 (amended, not closed),
-/// decision 33, and `open.md`.
+/// copies (decision 32). The selection rule became [`select_probe`]
+/// above, a `pub` function this crate exposes specifically so
+/// `embarch-core` can call it instead of keeping its own copy (decision
+/// 33) — and as of `embarch-core` decision 61, it does: `resolve_probe`
+/// now enumerates probes itself and delegates to this function, threading
+/// its own caller `action` (`"flash"`/`"reset"`) through the same way
+/// `enroll` does. **Decision 32 is closed; no selection-rule copy remains
+/// in either crate.**
 ///
 /// **This still doesn't — and structurally can't — verify that the probe a
 /// human *picked* really is the board they think it is.** Serial number and

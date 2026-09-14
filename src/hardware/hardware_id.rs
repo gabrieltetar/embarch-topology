@@ -68,7 +68,7 @@ enum ChipFamily {
 ///
 /// **It does not, however, stop where this function stops, and this comment
 /// used to say it did.** `embarch-core`'s `requires_vendor_tool` matches
-/// `nrf54h` as well (its decision 49), because an unmatched nRF54H name was
+/// `nrf54h` as well (`embarch-core` decision 49), because an unmatched nRF54H name was
 /// falling through to `false` and reaching probe-rs unannounced. Both repos
 /// refuse nRF54H, in opposite directions: this function abstains (`None`,
 /// "I cannot say which register pair holds its ID"), while

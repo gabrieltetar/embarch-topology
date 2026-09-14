@@ -175,9 +175,10 @@ pub fn enroll(role: &str, chip: &str, probe_serial: Option<&str>) -> anyhow::Res
 }
 
 /// The rule [`enroll`] applies to pick one attached debug probe out of an
-/// already-enumerated list — exposed as its own call (topology decision 33)
-/// so `embarch-core::resolve_probe` can adopt it instead of keeping an
-/// independently maintained second copy (`tasks/core/055`). See
+/// already-enumerated list — exposed as its own call (decision 33) so
+/// `embarch-core::resolve_probe` could adopt it instead of keeping an
+/// independently maintained second copy, and as of `tasks/core/055`
+/// (`embarch-core` decision 61), it does — decision 32 is closed. See
 /// [`validate::select_probe`] for what `action` is for and why zero probes
 /// is diagnosed before the serial lookup runs.
 #[cfg(feature = "hardware")]
