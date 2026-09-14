@@ -298,6 +298,69 @@ pub fn validate_role_timed(role: &str) -> Result<Validation> {
     Ok(Validation { board, validated_at_utc_ms })
 }
 
+/// The rule both [`enroll`] below and `embarch-core::resolve_probe`
+/// (`embarch-core/src/hardware.rs`) apply to pick one attached debug probe
+/// out of everything `probe-rs` currently enumerates: an explicit
+/// `probe_serial` finds that one probe or fails naming it; omitted, exactly
+/// one attached probe is required — the only sane default when there is no
+/// other way to tell which one a caller means.
+///
+/// Takes the already-enumerated list rather than calling [`Lister`] itself
+/// (topology decision 33) — the difference between a rule that can have a
+/// unit test and one that cannot, since neither of the two copies this
+/// reconciles was testable before. `action` is a present-tense verb naming
+/// what the caller is about to do with the picked probe (`"enroll"`,
+/// `"flash"`, `"reset"`, …): it appears in the multi-probe refusal below, so
+/// a caller keeps its own flavor of that message without a second copy of
+/// this function — decision 33's own note on why one fixed wording did not
+/// win outright.
+///
+/// Zero probes is checked first and unconditionally, ahead of the serial
+/// lookup: it is a stronger, more specific diagnosis than "no probe matches
+/// that serial" regardless of whether a serial was given, and it is the one
+/// case worth naming the likely cause of (a real incident behind the usbipd
+/// hint — decision 33). A serial that was given but not found is echoed
+/// back either way, so the caller isn't left guessing which case fired.
+pub fn select_probe(
+    probes: Vec<probe_rs::probe::DebugProbeInfo>,
+    probe_serial: Option<&str>,
+    action: &str,
+) -> Result<probe_rs::probe::DebugProbeInfo> {
+    if probes.is_empty() {
+        return Err(match probe_serial {
+            Some(wanted) => anyhow::anyhow!(
+                "no debug probe found (looking for serial '{wanted}') — check the USB \
+                 connection (and usbipd attach, if Core is on a Pi and the probe is elsewhere)"
+            ),
+            None => anyhow::anyhow!(
+                "no debug probe found — check the USB connection (and usbipd attach, if Core \
+                 is on a Pi and the probe is elsewhere)"
+            ),
+        });
+    }
+
+    if let Some(wanted) = probe_serial {
+        return probes.into_iter().find(|p| p.serial_number.as_deref() == Some(wanted)).ok_or_else(|| {
+            anyhow::anyhow!("no attached probe with serial '{wanted}' — is it still plugged in?")
+        });
+    }
+
+    if probes.len() > 1 {
+        let known: Vec<String> = probes
+            .iter()
+            .map(|p| format!("{} (serial={:?})", p.identifier, p.serial_number))
+            .collect();
+        anyhow::bail!(
+            "{action} requires exactly one debug probe attached ({} seen) — plug in only the \
+             board you mean to {action}, or specify which probe by serial. Attached probes: \
+             {known:?}",
+            probes.len()
+        );
+    }
+
+    Ok(probes.into_iter().next().expect("checked len == 1 above"))
+}
+
 /// `enroll_probe`'s implementation (`embarch-api`'s MCP tool of the same
 /// name, via `POST /probes/enroll`): attaches as `chip`, reads its live
 /// hardware ID, and records the association — overwriting any prior entry
@@ -315,17 +378,21 @@ pub fn validate_role_timed(role: &str) -> Result<Validation> {
 /// the only sane default when there's no other way to tell which one a
 /// caller means.
 ///
-/// **This block is a hand-copy of `embarch-core::resolve_probe`
-/// (`embarch-core/src/hardware.rs`, `pub(crate)`), not a call to it — decision
-/// 32.** The two were one implementation before `embarch-core` decision 22
-/// moved the board-identity gate into this crate; `pub(crate)` cannot cross
-/// the crate boundary that move created, so this is now an independently
-/// maintained second copy of the same selection rule. Documented rather than
-/// de-duplicated: the dependency runs `embarch-topology` → `embarch-core`,
-/// not back, so this crate cannot call `embarch-core`'s copy, and the reverse
-/// (exposing this as `pub` for `embarch-core` to call) needs an edit inside
-/// `embarch-core` that is out of a topology-scoped change's reach. See
-/// decision 32 and `open.md`.
+/// **This used to be a hand-copy of `embarch-core::resolve_probe`
+/// (`embarch-core/src/hardware.rs`, `pub(crate)`), not a call to it —
+/// decision 32.** The two were one implementation before `embarch-core`
+/// decision 22 moved the board-identity gate into this crate; `pub(crate)`
+/// cannot cross the crate boundary that move created, so the move silently
+/// turned one shared implementation into two independently maintained
+/// copies. **That stopped being true here as of decision 33**: the
+/// selection rule is now [`select_probe`] above, a `pub` function this
+/// crate exposes specifically so `embarch-core` can call it instead of
+/// keeping its own copy — this crate still cannot call back into
+/// `embarch-core` (the dependency runs the other way), but the direction
+/// that *can* close the duplication no longer needs an edit inside
+/// `embarch-core` to begin; it needs one to finish (`tasks/core/055`,
+/// blocked on this landing). See decision 32 (amended, not closed),
+/// decision 33, and `open.md`.
 ///
 /// **This still doesn't — and structurally can't — verify that the probe a
 /// human *picked* really is the board they think it is.** Serial number and
@@ -339,22 +406,7 @@ pub fn validate_role_timed(role: &str) -> Result<Validation> {
 pub fn enroll(role: &str, chip: &str, probe_serial: Option<&str>) -> Result<EnrolledBoard> {
     let lister = Lister::new();
     let probes = lister.list_all();
-    let info = match probe_serial {
-        Some(wanted) => probes
-            .into_iter()
-            .find(|p| p.serial_number.as_deref() == Some(wanted))
-            .ok_or_else(|| anyhow::anyhow!("no attached probe with serial '{wanted}' — is it still plugged in?"))?,
-        None => {
-            if probes.len() != 1 {
-                anyhow::bail!(
-                    "enrollment requires exactly one debug probe attached ({} seen) — plug in only the \
-                     board you mean to enroll, or specify which probe by serial",
-                    probes.len()
-                );
-            }
-            probes.into_iter().next().expect("checked len == 1 above")
-        }
-    };
+    let info = select_probe(probes, probe_serial, "enroll")?;
     let serial = info.serial_number.clone().ok_or_else(|| {
         anyhow::anyhow!(
             "the attached probe ({}) reports no USB serial number — it can't be enrolled \
@@ -449,5 +501,70 @@ mod tests {
         assert_eq!(board_confirmed_at, 1_788_195_194_573);
         assert_eq!(validated_at, 1_788_723_019_911);
         assert_ne!(board_confirmed_at, validated_at, "a real regression this guards against");
+    }
+
+    // `select_probe` needs a `&'static dyn ProbeFactory` to build a fake
+    // `DebugProbeInfo` (its one private field) — any concrete factory works,
+    // since these tests never call `.open()`. `JLinkFactory` is a public
+    // zero-sized type, so a `static` of it coerces to the trait object with
+    // no unsafe code.
+    static TEST_FACTORY: probe_rs::probe::jlink::JLinkFactory = probe_rs::probe::jlink::JLinkFactory;
+
+    fn probe(identifier: &str, serial: Option<&str>) -> probe_rs::probe::DebugProbeInfo {
+        probe_rs::probe::DebugProbeInfo::new(
+            identifier,
+            0x1366,
+            0x0101,
+            serial.map(String::from),
+            &TEST_FACTORY,
+            None,
+            false,
+        )
+    }
+
+    #[test]
+    fn select_probe_zero_probes_names_the_usb_connection() {
+        let err = select_probe(vec![], None, "enroll").expect_err("no probes must refuse");
+        assert!(err.to_string().contains("no debug probe found"));
+        assert!(err.to_string().contains("usbipd"), "the one diagnostic hint both callers should keep");
+    }
+
+    #[test]
+    fn select_probe_zero_probes_with_a_serial_still_names_the_usb_connection() {
+        let err = select_probe(vec![], Some("S1"), "flash").expect_err("no probes must refuse even with a serial");
+        let msg = err.to_string();
+        assert!(msg.contains("no debug probe found"), "zero probes is diagnosed before the serial lookup runs");
+        assert!(msg.contains("S1"), "the requested serial is still echoed back");
+    }
+
+    #[test]
+    fn select_probe_exactly_one_is_accepted_without_a_serial() {
+        let picked = select_probe(vec![probe("only", Some("S1"))], None, "enroll")
+            .expect("exactly one attached probe must be accepted");
+        assert_eq!(picked.serial_number.as_deref(), Some("S1"));
+    }
+
+    #[test]
+    fn select_probe_two_probes_without_a_serial_refuses_and_names_the_action() {
+        let probes = vec![probe("a", Some("S1")), probe("b", Some("S2"))];
+        let err = select_probe(probes, None, "enroll").expect_err("more than one attached probe must refuse");
+        let msg = err.to_string();
+        assert!(msg.contains("enroll requires exactly one debug probe attached (2 seen)"));
+        assert!(msg.contains("S1") && msg.contains("S2"), "both attached probes are named, not just counted");
+    }
+
+    #[test]
+    fn select_probe_serial_hit_picks_the_matching_probe_among_several() {
+        let probes = vec![probe("a", Some("S1")), probe("b", Some("S2"))];
+        let picked =
+            select_probe(probes, Some("S2"), "flash").expect("a serial matching an attached probe must resolve");
+        assert_eq!(picked.identifier, "b");
+    }
+
+    #[test]
+    fn select_probe_serial_miss_names_the_serial_it_could_not_find() {
+        let err = select_probe(vec![probe("a", Some("S1"))], Some("does-not-exist"), "flash")
+            .expect_err("a serial matching nothing attached must refuse");
+        assert!(err.to_string().contains("no attached probe with serial 'does-not-exist'"));
     }
 }
