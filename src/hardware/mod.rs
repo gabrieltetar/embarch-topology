@@ -174,6 +174,21 @@ pub fn enroll(role: &str, chip: &str, probe_serial: Option<&str>) -> anyhow::Res
     validate::enroll(role, chip, probe_serial)
 }
 
+/// The rule [`enroll`] applies to pick one attached debug probe out of an
+/// already-enumerated list — exposed as its own call (topology decision 33)
+/// so `embarch-core::resolve_probe` can adopt it instead of keeping an
+/// independently maintained second copy (`tasks/core/055`). See
+/// [`validate::select_probe`] for what `action` is for and why zero probes
+/// is diagnosed before the serial lookup runs.
+#[cfg(feature = "hardware")]
+pub fn select_probe(
+    probes: Vec<probe_rs::probe::DebugProbeInfo>,
+    probe_serial: Option<&str>,
+    action: &str,
+) -> anyhow::Result<probe_rs::probe::DebugProbeInfo> {
+    validate::select_probe(probes, probe_serial, action)
+}
+
 /// Every debug probe currently attached, live — read-only, nothing
 /// persisted. What `embarch-topology`'s own UI/CLI shows a human *before*
 /// enrolling, so "exactly one probe attached" is something they can check
