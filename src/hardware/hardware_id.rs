@@ -3,7 +3,7 @@
 //! cross-checks against [`super::enrollment`], since it survives a probe
 //! getting physically moved to a different board in a way a bare USB serial
 //! number can't. Formerly `embarch-core`'s own `hardware_id.rs`, moved here
-//! unchanged (decisions 2, 4).
+//! unchanged (`embarch-core` decision 22).
 //!
 //! Only the chip families this suite's real hardware actually uses are
 //! implemented — Nordic (classic and nRF54L), Espressif ESP32-C5, and
