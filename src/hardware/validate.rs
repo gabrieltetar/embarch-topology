@@ -399,8 +399,8 @@ pub fn select_probe(
 /// **This still doesn't — and structurally can't — verify that the probe a
 /// human *picked* really is the board they think it is.** Serial number and
 /// probe identifier are exactly what a same-probe-type ambiguity (decision
-/// 10's own flagged risk: two boards sharing a chip family, e.g. two
-/// J-Links) leaves nothing to tell apart by. `enroll`'s own live hardware-ID
+/// 15's own flagged risk: two boards sharing an identical probe type, e.g.
+/// two J-Links) leaves nothing to tell apart by. `enroll`'s own live hardware-ID
 /// readback below still catches a *wrong chip name* for the picked probe;
 /// it can't catch "right chip, wrong physical board" when both boards
 /// genuinely are that chip. That case still needs physical isolation — no

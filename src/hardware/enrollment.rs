@@ -1,7 +1,7 @@
 //! `enrollment.toml`: a machine-local table recording which physical board a
 //! debug probe's serial number is actually wired to. Formerly
-//! `embarch-core`'s own `known_boards.rs` / `known_boards.toml` (decisions
-//! 2, 3, 7) — this is "the one thing that's genuinely
+//! `embarch-core`'s own `known_boards.rs` / `known_boards.toml`
+//! (`embarch-core` decision 22) — this is "the one thing that's genuinely
 //! persisted, since it's declared intent, not detectable" (spec.md):
 //! nothing in a USB descriptor says "I'm wired to the DUT." A human's
 //! one-time act of physically isolating a board and enrolling its probe
