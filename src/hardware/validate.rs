@@ -13,16 +13,27 @@
 //! [`TopologyMismatch`] is durably logged** (`alert.rs`) before the
 //! structured error is even returned, so the record exists regardless of
 //! what the caller does with the `Err` it gets back — that is decision 12's
-//! claim, and it holds. **It is not every *failure* in this gate**:
-//! `validate_known_timed`'s probe-open, `check_target_powered`, `attach`,
-//! core-select and hardware-ID-read steps each fail closed (the operation is
-//! still blocked) but return a plain `anyhow::Error` on the way, not a
-//! [`TopologyMismatch`] — un-logged and not downcastable, unlike the two
-//! branches that call [`raise`] (probe absent from `Lister::list_all()`, and
-//! a hardware-ID compare that doesn't match). The live push that used to
-//! accompany the alert log was retired 2026-08-25 (decision 19) —
-//! `embarch-ui` polls the same log through `embarch-core`'s `GET /alerts`
-//! instead.
+//! claim, and it holds. **As of decision 34, that is every failure point in
+//! this gate, not just two of seven.** `validate_known_timed` used to return
+//! a plain, un-logged, non-downcastable `anyhow::Error` from its
+//! probe-open, `check_target_powered`, `attach`, core-select and
+//! hardware-ID-read steps, distinct from the two branches that already
+//! called [`raise`] (probe absent from `Lister::list_all()`, and a
+//! hardware-ID compare that doesn't match). All seven now call [`raise`],
+//! each with a `reason` naming which step failed and why — an unpowered
+//! board, a busy or permission-denied probe, and a hardware-ID mismatch are
+//! different facts and read as different facts in the log. **What this does
+//! not yet give a caller a structural way to tell apart:** every one of the
+//! five newly-routed failures sets `live_hardware_id: None`, the same value
+//! the pre-existing "probe not enumerated at all" branch sets — so
+//! `embarch-core`'s current binary `kind` classifier
+//! (`"not_attached"` vs `"mismatch"`, that crate's decision 59) will read an
+//! attached-but-stuck probe as `"not_attached"` too. Decision 34 records
+//! that as a known, deliberately out-of-scope gap: whether `embarch-core`
+//! needs a third `kind` value is that crate's question, not this crate's.
+//! The live push that used to accompany the alert log was retired
+//! 2026-08-25 (decision 19) — `embarch-ui` polls the same log through
+//! `embarch-core`'s `GET /alerts` instead.
 //!
 //! **What this does not close on its own** (decision 8's own
 //! "real gap" note): confirming the enrolled
@@ -135,11 +146,15 @@ pub struct TopologyMismatch {
     pub recorded_hardware_id: String,
     /// `None` when the enrolled probe isn't currently attached at all —
     /// not found in `Lister::list_all()` — a mismatch either way, just not
-    /// one with a live hardware ID to show. **Not** the "probe is attached
-    /// but `.open()` itself fails" case (another process holding it,
-    /// permission denied, a half-wedged J-Link): that path returns a plain
-    /// `anyhow::Error` straight out of `validate_known_timed`, never
-    /// reaches this type, and logs no alert — see the module header.
+    /// one with a live hardware ID to show. **Also `None`, as of decision
+    /// 34, for every step of "open and read the board" that fails before a
+    /// live hardware ID is ever obtained** (`.open()`, `check_target_powered`,
+    /// `.attach()`, core-select, `hardware_id::read`) — those used to skip
+    /// this type entirely (see the module header's history); they now
+    /// reach it too, distinguished from each other and from "not attached"
+    /// only by `reason`'s text, not by this field. A caller that needs a
+    /// structural (not string-parsed) answer to "was the probe even there"
+    /// cannot get one from this field alone.
     pub live_hardware_id: Option<String>,
     pub reason: String,
     pub fix_it_url: String,
@@ -243,18 +258,67 @@ fn validate_known_timed(known: EnrolledBoard) -> Result<(EnrolledBoard, u64)> {
         }
     };
 
-    let mut probe = probe_info
-        .open()
-        .context("failed to open the enrolled probe for the board-identity gate")?;
-    check_target_powered(&mut probe)
-        .with_context(|| format!("can't validate role '{}'", known.role))?;
-    let mut session = probe
-        .attach(known.chip.as_str(), Permissions::default())
-        .with_context(|| format!("failed to attach to '{}' for the board-identity gate", known.chip))?;
-    let mut core = session
-        .core(0)
-        .context("failed to select core 0 for the board-identity gate")?;
-    let live_hardware_id = hardware_id::read(&mut core, &known.chip)?;
+    let mut probe = match probe_info.open() {
+        Ok(probe) => probe,
+        Err(e) => {
+            return Err(raise(
+                &known,
+                None,
+                format!(
+                    "probe '{}' enrolled as role '{}' is attached but could not be opened ({e}) \
+                     — another process may be holding it, the OS may be denying permission, or \
+                     it may be a half-wedged debug probe; close other tools that might have it \
+                     open, or unplug and replug it, then retry",
+                    known.probe_serial, known.role
+                ),
+            ))
+        }
+    };
+    if let Err(e) = check_target_powered(&mut probe) {
+        return Err(raise(&known, None, format!("can't validate role '{}': {e}", known.role)));
+    }
+    let mut session = match probe.attach(known.chip.as_str(), Permissions::default()) {
+        Ok(session) => session,
+        Err(e) => {
+            return Err(raise(
+                &known,
+                None,
+                format!(
+                    "probe '{}' enrolled as role '{}' opened but failed to attach to chip '{}' \
+                     ({e})",
+                    known.probe_serial, known.role, known.chip
+                ),
+            ))
+        }
+    };
+    let mut core = match session.core(0) {
+        Ok(core) => core,
+        Err(e) => {
+            return Err(raise(
+                &known,
+                None,
+                format!(
+                    "probe '{}' enrolled as role '{}' attached to chip '{}' but failed to select \
+                     core 0 ({e})",
+                    known.probe_serial, known.role, known.chip
+                ),
+            ))
+        }
+    };
+    let live_hardware_id = match hardware_id::read(&mut core, &known.chip) {
+        Ok(id) => id,
+        Err(e) => {
+            return Err(raise(
+                &known,
+                None,
+                format!(
+                    "probe '{}' enrolled as role '{}' attached to chip '{}' but failed to read \
+                     its hardware ID ({e})",
+                    known.probe_serial, known.role, known.chip
+                ),
+            ))
+        }
+    };
     drop(core);
     drop(session);
 
