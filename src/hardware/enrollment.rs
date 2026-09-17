@@ -182,6 +182,14 @@ pub fn list() -> Result<Vec<EnrolledBoard>> {
 /// returned rather than dropped silently: replacing one board with another
 /// under the same name is exactly the kind of thing a caller should be able
 /// to say out loud. `Ok(None)` means nothing was displaced.
+///
+/// **That return covers exactly one row.** This function only ever
+/// de-duplicates going forward — nothing on the load path re-checks the
+/// invariant — so a store that already held more than one row for `role`
+/// (reachable only via a hand-edited or pre-2026-08-31 `enrollment.toml`,
+/// since this function itself never creates that state) reports the first
+/// one found displaced and silently removes the rest: `find` below returns
+/// one, `retain` removes every row sharing `role`.
 #[cfg(feature = "hardware")]
 pub fn upsert(board: EnrolledBoard) -> Result<Option<EnrolledBoard>> {
     upsert_at(&paths::enrollment_path()?, board)
