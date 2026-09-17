@@ -65,8 +65,11 @@ cargo test --features hardware                         # both, default features 
 No hardware or elevated privileges are needed for `cargo test`. Live
 `enroll`/`validate` runs do need write access to this crate's own data
 directory (`/var/lib/embarch/topology` on Linux/macOS, `%ProgramData%\embarch\topology`
-on Windows) — the same machine-wide, admin-owned location `embarch-core`'s
-token file already uses, for the same reason (decision 23).
+on Windows) — the same machine-wide location `embarch-core`'s token file
+already uses, for the same reason (decision 23). The directory itself keeps
+its default, non-admin-restricted permissions — only `embarch-core`'s token
+*file* is admin-locked; decision 23 corrected the earlier "admin-owned"
+wording as an error.
 
 ## License
 

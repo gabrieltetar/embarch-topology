@@ -70,7 +70,7 @@ enum Command {
     ///
     /// `--clear-serial`/`--clear-interface` unset a previously declared
     /// fact instead of declaring a new one — the fix for the exact failure
-    /// decision 20 records: a stale declared serial or interface hard-
+    /// decision 27 records: a stale declared serial or interface hard-
     /// narrows detection to a port that no longer exists, and re-enrolling
     /// by role carries it right back over (`validate::enroll`'s own doc
     /// comment on why that's keyed on probe serial), so there was
@@ -147,7 +147,7 @@ fn render_error(e: &anyhow::Error) -> String {
 /// `embarch-core/decisions/platform.md:32`) — a second process calling the
 /// same function races Core's lock with no queue and no message
 /// (`embarch-topology/decisions/enrollment.md:15`,
-/// `embarch-core/decisions/surfaces.md:17`), and on a `wsl-host` machine
+/// `embarch-core/decisions/enrollment.md:10`), and on a `wsl-host` machine
 /// writes a *different* store than the one the Windows-service Core reads
 /// (`hardware/paths.rs`).
 ///
