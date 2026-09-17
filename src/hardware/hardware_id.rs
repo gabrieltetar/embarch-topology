@@ -168,6 +168,13 @@ pub enum SelfReportedIdentity {
 /// whose bytes and their order are a per-SoC *driver* decision. They describe
 /// the same silicon; they need not spell it the same way.
 ///
+/// **That is also why a plain equality check, below, is not a competing
+/// design but the function's fast path.** [`compare_self_reported`] checks it
+/// first, for *any* chip: two mechanisms agreeing on a factory-unique value
+/// byte for byte is conclusive on its own, declared relation or not. What a
+/// relation buys is the case equality alone cannot settle — the same silicon,
+/// spelled differently.
+///
 /// **Two chip families have a declared relation: `esp32c5`, and the Nordic
 /// families [`is_nordic_deviceid_chip`] recognizes.** An arm here is only
 /// writable when the transform is *derivable*, not guessed.
@@ -192,10 +199,11 @@ pub enum SelfReportedIdentity {
 /// independent corroboration. A declared relation and a family-wide
 /// confirmation are different claims; only the first is made here.
 ///
-/// Every other chip returns [`SelfReportedIdentity::Undeclared`], which is
-/// **not** a pass: a comparison that could not be made is not a comparison
-/// that succeeded. Writing an arm for one requires the same thing these two
-/// had — both implementations' actual register reads, in view at once.
+/// Every chip that neither matches exactly nor has a declared relation
+/// returns [`SelfReportedIdentity::Undeclared`], which is **not** a pass: a
+/// comparison that could not be made is not a comparison that succeeded.
+/// Writing a relation arm for one requires the same thing these two had —
+/// both implementations' actual register reads, in view at once.
 pub fn compare_self_reported(chip: &str, jtag_read: &str, self_reported: &str) -> SelfReportedIdentity {
     if self_reported.is_empty() {
         return SelfReportedIdentity::NotReported;
