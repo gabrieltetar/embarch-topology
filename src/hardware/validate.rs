@@ -1,9 +1,10 @@
 //! Live board-identity validation — formerly `embarch-core`'s own
-//! `board_gate.rs` (decisions 2, 8). One implementation,
-//! multiple call sites: `embarch-core`'s `hardware::flash`/`reset` and
-//! `study.rs`'s dev-bench handshake call exactly the functions here, and so
-//! does `embarch-topology`'s own CLI — there is no second, independently-
-//! reasoned copy of this logic anywhere in the suite to disagree with it.
+//! `board_gate.rs` (`embarch-core` decision 22). One implementation,
+//! multiple call sites (decision 8): `embarch-core`'s
+//! `hardware::flash`/`reset` and `study.rs`'s dev-bench handshake call
+//! exactly the functions here, and so does `embarch-topology`'s own CLI —
+//! there is no second, independently-reasoned copy of this logic anywhere in
+//! the suite to disagree with it.
 //! (The local web UI this crate's binary used to also serve is retired,
 //! 2026-08-24 — decision 5.)
 //!
