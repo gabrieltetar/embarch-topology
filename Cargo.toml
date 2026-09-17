@@ -45,11 +45,12 @@ reqwest = { version = "0.13.4", default-features = false, features = ["rustls"],
 tokio = { version = "1.53.0", features = ["rt", "macros", "sync", "time"], optional = true }
 
 # ---- feature-gated under `hardware` (embarch-core is the one consumer) or
-# `bin` (this crate's own CLI/UI binary) — never by embarch-api/
+# `bin` (this crate's own CLI binary) — never by embarch-api/
 # embarch-umbrella, which stay hardware-free in their own dependency
 # footprint by design (embarch-umbrella/Cargo.toml's own "deliberately
 # absent" comment; spec.md's "What each consumer owns now": feature-gate the
-# hardware half rather than force it on every consumer).
+# hardware half rather than force it on every consumer). (The local web UI
+# this crate's binary used to also serve is retired, 2026-08-24 — decision 5.)
 probe-rs = { version = "0.31", optional = true }
 serialport = { version = "4.9.0", features = ["usbportinfo-interface"], optional = true }
 # ---- feature-gated under `wire`, which `hardware` implies. `serde` used to
