@@ -9,12 +9,20 @@
 //! 2026-08-24 — decision 5.)
 //!
 //! Fails closed in every branch — an unenrolled or now-mismatched probe
-//! blocks the operation entirely, never a guess. Every mismatch is durably
-//! logged (`alert.rs`) before the structured error is even constructed, so
-//! the record exists regardless of what the caller does with the `Err` it
-//! gets back. The live push that used to accompany that log was retired
-//! 2026-08-25 (decision 19) — `embarch-ui` polls the same log
-//! through `embarch-core`'s `GET /alerts` instead.
+//! blocks the operation entirely, never a guess. **Every constructed
+//! [`TopologyMismatch`] is durably logged** (`alert.rs`) before the
+//! structured error is even returned, so the record exists regardless of
+//! what the caller does with the `Err` it gets back — that is decision 12's
+//! claim, and it holds. **It is not every *failure* in this gate**:
+//! `validate_known_timed`'s probe-open, `check_target_powered`, `attach`,
+//! core-select and hardware-ID-read steps each fail closed (the operation is
+//! still blocked) but return a plain `anyhow::Error` on the way, not a
+//! [`TopologyMismatch`] — un-logged and not downcastable, unlike the two
+//! branches that call [`raise`] (probe absent from `Lister::list_all()`, and
+//! a hardware-ID compare that doesn't match). The live push that used to
+//! accompany the alert log was retired 2026-08-25 (decision 19) —
+//! `embarch-ui` polls the same log through `embarch-core`'s `GET /alerts`
+//! instead.
 //!
 //! **What this does not close on its own** (decision 8's own
 //! "real gap" note): confirming the enrolled
@@ -125,9 +133,13 @@ pub struct TopologyMismatch {
     pub probe_serial: String,
     pub chip: String,
     pub recorded_hardware_id: String,
-    /// `None` when the enrolled probe couldn't even be opened (unplugged,
-    /// most likely) — a mismatch either way, just not one with a live
-    /// hardware ID to show.
+    /// `None` when the enrolled probe isn't currently attached at all —
+    /// not found in `Lister::list_all()` — a mismatch either way, just not
+    /// one with a live hardware ID to show. **Not** the "probe is attached
+    /// but `.open()` itself fails" case (another process holding it,
+    /// permission denied, a half-wedged J-Link): that path returns a plain
+    /// `anyhow::Error` straight out of `validate_known_timed`, never
+    /// reaches this type, and logs no alert — see the module header.
     pub live_hardware_id: Option<String>,
     pub reason: String,
     pub fix_it_url: String,
