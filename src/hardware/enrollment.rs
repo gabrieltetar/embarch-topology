@@ -18,6 +18,34 @@ use std::path::Path;
 #[cfg(feature = "hardware")]
 use super::paths;
 
+/// The one role a DUT is enrolled under. Its dev-bench counterpart is
+/// [`super::port::DEV_BENCH_ROLE`], which predates this constant and stays
+/// where the port resolver reads it.
+pub const DUT_ROLE: &str = "dut";
+
+/// The suite's whole role vocabulary: **two fixed roles, and a board name is
+/// a separate fact** (`embarch-ui` decision 44). Before that, a board's only
+/// human-readable label *was* its role, so a bench with a third board got a
+/// third role invented for it (`client-nucleo`) — a name wearing a
+/// role's clothes, which made "which board is the DUT" unanswerable by
+/// looking.
+///
+/// **Closed on the write path, tolerant on the load path.** [`upsert`] is
+/// reached through `embarch-core`'s `POST /probes/enroll`, which rejects a
+/// role outside this pair; nothing here re-checks a row already on disk,
+/// because a store predating a later fact must keep loading (the same rule
+/// `link_port_serial` and `signals` are under). A foreign row is therefore
+/// still reachable through [`list`], and the surface that shows it is what
+/// offers to remove it.
+pub const CANONICAL_ROLES: [&str; 2] = [super::port::DEV_BENCH_ROLE, DUT_ROLE];
+
+/// Whether `role` is one of [`CANONICAL_ROLES`]. The check `embarch-core`'s
+/// enroll route applies before writing, and the check a renderer applies to
+/// decide whether a row is a board holding a role or a leftover to clear.
+pub fn is_canonical_role(role: &str) -> bool {
+    CANONICAL_ROLES.contains(&role)
+}
+
 /// One enrolled probe↔board association. `hardware_id` is the target chip's
 /// own factory-burned unique ID — independent of which probe or cable
 /// answers, so it survives a probe getting physically moved to a different
@@ -26,6 +54,25 @@ use super::paths;
 pub struct EnrolledBoard {
     pub probe_serial: String,
     pub role: String,
+    /// The human's own name for the physical board currently holding
+    /// `role` — `client-nucleo`, `wearable-rev6` — and **opaque
+    /// here**: nothing in this crate reads it, compares it or requires it
+    /// to resolve to anything. It exists because `role` stopped being a
+    /// name (`embarch-ui` decision 44): two boards can hold the same role
+    /// on different days and the same chip string, and the only thing that
+    /// tells them apart in a table is what a human called them.
+    ///
+    /// The catalog it names lives in a firmware repo
+    /// (`embarch/boards.toml`), not on this machine, so a name written
+    /// under one project and read under another may resolve to nothing —
+    /// which is a fact for the renderer to state, never for this crate to
+    /// repair.
+    ///
+    /// `#[serde(default)]` for the same reason every field below it has
+    /// one: an `enrollment.toml` written before names existed still loads,
+    /// with an empty name rather than a guessed one.
+    #[serde(default)]
+    pub name: String,
     pub chip: String,
     /// The probe-read (JTAG) hardware ID — not the bench's self-reported
     /// one. `embarch-core` decision 56.
@@ -218,6 +265,43 @@ fn upsert_at(path: &Path, board: EnrolledBoard) -> Result<Option<EnrolledBoard>>
     Ok(displaced)
 }
 
+/// Removes whatever board holds `role`, returning it. `Ok(None)` means
+/// nothing was enrolled under that role — an ordinary outcome for a caller
+/// retracting a row it believed existed, and the one the HTTP layer answers
+/// `404` to.
+///
+/// **The counterpart [`upsert`] never had.** Enrolling could displace a row
+/// (by role, or by probe serial) but nothing could retract one, so a
+/// mis-enrolled board — or, before roles closed to a fixed pair
+/// ([`CANONICAL_ROLES`]), a board enrolled under an invented role — stayed
+/// in `enrollment.toml` for good, short of hand-editing a file inside a
+/// permission wall on the real deployment. Removing is a plain file write:
+/// no probe is opened, and a board that is not attached is removed exactly
+/// as one that is.
+///
+/// Every row sharing `role` goes, not just the first, for the same reason
+/// [`upsert`] retains that way: a pre-2026-08-31 store can hold more than
+/// one, and leaving the rest behind would make a retraction look like it had
+/// silently failed.
+#[cfg(feature = "hardware")]
+pub fn remove_by_role(role: &str) -> Result<Option<EnrolledBoard>> {
+    remove_by_role_at(&paths::enrollment_path()?, role)
+}
+
+/// [`remove_by_role`]'s body against an explicit path, testable for real —
+/// the same split [`upsert_at`] is under, and for the same reason.
+#[cfg(feature = "hardware")]
+fn remove_by_role_at(path: &Path, role: &str) -> Result<Option<EnrolledBoard>> {
+    let mut store = load_at(path)?;
+    let removed = store.boards.iter().find(|b| b.role == role).cloned();
+    if removed.is_none() {
+        return Ok(None);
+    }
+    store.boards.retain(|b| b.role != role);
+    save_at(path, &store)?;
+    Ok(removed)
+}
+
 /// Declares `role`'s runtime-link USB serial (`EnrolledBoard::link_port_serial`'s
 /// own doc comment) — a second, independent fact from the probe-rs identity
 /// readback `enroll`/`upsert` do, since a plain UART bridge has no chip to
@@ -286,7 +370,8 @@ mod tests {
     fn sample(serial: &str) -> EnrolledBoard {
         EnrolledBoard {
             probe_serial: serial.to_string(),
-            role: "reference-dut-fw".to_string(),
+            role: DUT_ROLE.to_string(),
+            name: "reference-dut-fw".to_string(),
             chip: "nRF54L15".to_string(),
             hardware_id: "deadbeefcafef00d".to_string(),
             confirmed_at_utc_ms: 1_755_000_000_000,
@@ -519,5 +604,78 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Removing is keyed on role and takes every row holding it — the
+    /// pre-2026-08-31 duplicate case `upsert` already retains against.
+    #[test]
+    fn remove_by_role_takes_every_row_holding_it_and_returns_one() {
+        let dir = temp_path("remove-role-dir");
+        let path = dir.join("enrollment.toml");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // A store as a hand-edited one can be: two rows sharing a role,
+        // plus an unrelated board that must survive.
+        let mut first = sample("D0:CF:13:ED:F9:30");
+        first.role = "client-nucleo".to_string();
+        let mut second = sample("001057729826");
+        second.role = "client-nucleo".to_string();
+        let keeper = sample("000852006107");
+        save_at(
+            &path,
+            &Store { boards: vec![first.clone(), second, keeper.clone()], signals: Vec::new() },
+        )
+        .unwrap();
+
+        let removed = remove_by_role_at(&path, "client-nucleo").unwrap();
+        assert_eq!(removed, Some(first));
+
+        let boards = load_at(&path).unwrap().boards;
+        assert_eq!(boards, vec![keeper], "every row holding the role must go, and only those");
+    }
+
+    /// Retracting a role nothing holds is an ordinary answer, not an error,
+    /// and it must not rewrite the file.
+    #[test]
+    fn remove_by_role_reports_nothing_removed_without_touching_the_store() {
+        let dir = temp_path("remove-missing-dir");
+        let path = dir.join("enrollment.toml");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        save_at(&path, &Store { boards: vec![sample("000852006107")], signals: Vec::new() })
+            .unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+
+        assert_eq!(remove_by_role_at(&path, "dev-bench").unwrap(), None);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A store written before names existed still loads, with an empty name
+    /// rather than a failure or a guess.
+    #[test]
+    fn a_store_without_names_still_loads() {
+        let toml = r#"
+[[boards]]
+probe_serial = "000852006107"
+role = "dut"
+chip = "nRF54L15"
+hardware_id = "deadbeefcafef00d"
+confirmed_at_utc_ms = 1755000000000
+"#;
+        let store: Store = toml::from_str(toml).expect("a pre-name store must still load");
+        assert_eq!(store.boards[0].name, "");
+        assert_eq!(store.boards[0].role, DUT_ROLE);
+    }
+
+    /// The role vocabulary is closed, and a board name is not a role.
+    #[test]
+    fn only_the_two_canonical_roles_are_roles() {
+        assert!(is_canonical_role("dut"));
+        assert!(is_canonical_role("dev-bench"));
+        assert!(!is_canonical_role("client-nucleo"));
+        assert!(!is_canonical_role("DUT"), "the wire spelling is lowercase; the label is not");
+        assert!(!is_canonical_role(""));
     }
 }

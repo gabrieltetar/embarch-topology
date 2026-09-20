@@ -41,6 +41,12 @@ enum Command {
     /// Enroll a debug probe under `role`, reading its live hardware ID as
     /// `chip`. With more than one probe attached, `--probe-serial` picks
     /// which one — omitted, exactly one must be attached.
+    ///
+    /// `role` is `dut` or `dev-bench` and nothing else (`embarch-ui`
+    /// decision 44). What a board is *called* is `--name`, a separate fact:
+    /// before it existed the only place to put a board's name was its role,
+    /// which is how a bench ended up with a board enrolled as
+    /// `client-nucleo`.
     Enroll {
         #[arg(long)]
         role: String,
@@ -48,6 +54,17 @@ enum Command {
         chip: String,
         #[arg(long)]
         probe_serial: Option<String>,
+        /// What this physical board is called — free text, matched against
+        /// a firmware repo's `embarch/boards.toml` by the surfaces that
+        /// render it, never by this crate.
+        #[arg(long, default_value = "")]
+        name: String,
+    },
+    /// Retract whatever board holds `role`, leaving that role empty. Opens
+    /// no probe: an unplugged board unenrols exactly like an attached one.
+    Unenroll {
+        #[arg(long)]
+        role: String,
     },
     /// Re-verify an already-enrolled board's live identity, by role.
     Validate {
@@ -139,6 +156,21 @@ fn render_error(e: &anyhow::Error) -> String {
     }
 }
 
+/// Refuses a role outside the fixed pair (`hardware::CANONICAL_ROLES`).
+/// The same rule `embarch-core`'s `POST /probes/enroll` applies, stated
+/// here too because this binary writes the store directly on a machine with
+/// no Core (`refuse_if_core_reachable`) — a check only Core held would be
+/// no check at all on exactly the bench that bootstraps itself.
+fn check_canonical_role(role: &str) -> anyhow::Result<()> {
+    if hardware::is_canonical_role(role) {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "'{role}' is not a role — the roles are {}. What a board is called goes in --name",
+        hardware::CANONICAL_ROLES.join(" and ")
+    )
+}
+
 /// Refuses a mutation when a live `embarch-core` answers on this machine —
 /// `embarch-topology` decision 28 (`decisions/enrollment.md`). `enroll`,
 /// `validate` and `set-dev-bench-link` all open a probe or write
@@ -198,7 +230,11 @@ fn main() -> anyhow::Result<()> {
         }
         Command::List => {
             for b in hardware::list_enrolled()? {
-                print!("{}: probe {} chip {} hardware_id {}", b.role, b.probe_serial, b.chip, b.hardware_id);
+                let name = if b.name.is_empty() { "(unnamed)" } else { b.name.as_str() };
+                print!(
+                    "{}: {} probe {} chip {} hardware_id {}",
+                    b.role, name, b.probe_serial, b.chip, b.hardware_id
+                );
                 if let Some(s) = &b.link_port_serial {
                     print!(" link_port_serial {s}");
                 }
@@ -208,14 +244,34 @@ fn main() -> anyhow::Result<()> {
                 println!();
             }
         }
-        Command::Enroll { role, chip, probe_serial } => {
+        Command::Enroll { role, chip, probe_serial, name } => {
             let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
             refuse_if_core_reachable(&rt, "/probes/enroll")?;
-            let board = hardware::enroll(&role, &chip, probe_serial.as_deref())?;
+            check_canonical_role(&role)?;
+            let board = hardware::enroll(&role, &chip, probe_serial.as_deref(), &name)?;
             println!(
                 "enrolled '{}' as role '{}': probe {}, hardware_id {}",
-                board.chip, board.role, board.probe_serial, board.hardware_id
+                if board.name.is_empty() { board.chip.as_str() } else { board.name.as_str() },
+                board.role,
+                board.probe_serial,
+                board.hardware_id
             );
+        }
+        Command::Unenroll { role } => {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+            refuse_if_core_reachable(&rt, "/probes/enrolled")?;
+            // A role outside the canonical pair is exactly what this
+            // command exists to clear, so it is *not* checked here.
+            match hardware::unenroll(&role)? {
+                Some(b) => println!(
+                    "unenrolled role '{}': was probe {} chip {} hardware_id {}",
+                    b.role, b.probe_serial, b.chip, b.hardware_id
+                ),
+                None => {
+                    eprintln!("no board enrolled under role '{role}'");
+                    std::process::exit(1);
+                }
+            }
         }
         Command::Validate { role } => {
             let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;

@@ -26,7 +26,7 @@ pub mod signal;
 mod validate;
 
 pub use alert::{Alert, UI_HOST, UI_PORT};
-pub use enrollment::EnrolledBoard;
+pub use enrollment::{is_canonical_role, EnrolledBoard, CANONICAL_ROLES, DUT_ROLE};
 #[cfg(feature = "hardware")]
 pub use hardware_id::{compare_self_reported, SelfReportedIdentity};
 #[cfg(feature = "hardware")]
@@ -170,8 +170,23 @@ pub fn list_serial_ports() -> anyhow::Result<Vec<DetectedPort>> {
 /// `None` requires exactly one to be attached, same as before this param
 /// existed.
 #[cfg(feature = "hardware")]
-pub fn enroll(role: &str, chip: &str, probe_serial: Option<&str>) -> anyhow::Result<EnrolledBoard> {
-    validate::enroll(role, chip, probe_serial)
+pub fn enroll(
+    role: &str,
+    chip: &str,
+    probe_serial: Option<&str>,
+    name: &str,
+) -> anyhow::Result<EnrolledBoard> {
+    validate::enroll(role, chip, probe_serial, name)
+}
+
+/// Retracts whatever board holds `role`, returning it; `Ok(None)` when
+/// nothing was enrolled under it. The write behind `embarch-core`'s
+/// `DELETE /probes/enrolled/{role}` — see [`enrollment::remove_by_role`]
+/// for why enrolling needed a counterpart at all, and why removing opens no
+/// probe.
+#[cfg(feature = "hardware")]
+pub fn unenroll(role: &str) -> anyhow::Result<Option<EnrolledBoard>> {
+    enrollment::remove_by_role(role)
 }
 
 /// The rule [`enroll`] applies to pick one attached debug probe out of an

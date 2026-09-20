@@ -482,7 +482,12 @@ pub fn select_probe(
 /// it can't catch "right chip, wrong physical board" when both boards
 /// genuinely are that chip. That case still needs physical isolation — no
 /// UI can enroll around it.
-pub fn enroll(role: &str, chip: &str, probe_serial: Option<&str>) -> Result<EnrolledBoard> {
+pub fn enroll(
+    role: &str,
+    chip: &str,
+    probe_serial: Option<&str>,
+    name: &str,
+) -> Result<EnrolledBoard> {
     let lister = Lister::new();
     let probes = lister.list_all();
     let info = select_probe(probes, probe_serial, "enroll")?;
@@ -518,6 +523,10 @@ pub fn enroll(role: &str, chip: &str, probe_serial: Option<&str>) -> Result<Enro
     let board = EnrolledBoard {
         probe_serial: serial,
         role: role.to_string(),
+        // Recorded verbatim, including empty: a caller that has no name for
+        // this board says so by sending none, and an empty name renders as
+        // "unnamed", never as a name this crate made up out of the chip.
+        name: name.to_string(),
         chip: chip.to_string(),
         hardware_id,
         confirmed_at_utc_ms: enrollment::now_utc_ms(),
@@ -554,6 +563,7 @@ mod tests {
         EnrolledBoard {
             probe_serial: "serial".into(),
             role: "dev-bench".into(),
+            name: "bench-nrf54l15dk".into(),
             chip: "nRF54L15".into(),
             hardware_id: "6fcddc36cb781b71".into(),
             confirmed_at_utc_ms: 1_788_195_194_573,
