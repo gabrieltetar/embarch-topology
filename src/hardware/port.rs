@@ -353,7 +353,11 @@ impl Filter {
                 let interface = board.link_port_interface;
                 match board.link_port_serial {
                     Some(link_serial) => (Some(link_serial), false, interface),
-                    None => (Some(board.probe_serial), true, interface),
+                    // No declared link serial: fall back to the JTAG
+                    // probe's own, when there is one. A role with a board
+                    // type and no probe yet narrows nothing, which is the
+                    // same answer as an unenrolled role.
+                    None => (board.probe_serial, true, interface),
                 }
             }
             Ok(None) => (None, true, None),

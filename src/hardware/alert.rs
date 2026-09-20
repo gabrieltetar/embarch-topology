@@ -69,15 +69,49 @@ impl Alert {
     /// which only the process that *detects* a mismatch has any business
     /// doing. A `wire`-only consumer deserializes alerts Core already raised.
     #[cfg(feature = "hardware")]
+    /// `probe_serial` and `recorded_hardware_id` are passed in rather than
+    /// read off `known`, because on the row those two are optional
+    /// (`embarch-ui` decision 45) and an alert's are not: an alert is only
+    /// ever raised from a validate that had both, and a record that said
+    /// "mismatch on probe ''" would be worse than no record.
+    #[cfg(feature = "hardware")]
+    pub fn from_validation(
+        known: &EnrolledBoard,
+        probe_serial: String,
+        recorded_hardware_id: String,
+        live_hardware_id: Option<String>,
+        reason: String,
+    ) -> Self {
+        let occurred_at_utc_ms = super::enrollment::now_utc_ms();
+        Alert {
+            id: format!("{occurred_at_utc_ms:x}-{}", std::process::id()),
+            occurred_at_utc_ms,
+            role: known.role.clone(),
+            probe_serial,
+            chip: known.chip.clone(),
+            recorded_hardware_id,
+            live_hardware_id,
+            reason,
+        }
+    }
+
+    /// The older constructor, for a row whose halves are both present.
+    /// Falls back to an explicit `"(none)"` rather than an empty string if
+    /// they are not, so a hand-edited store cannot produce an alert that
+    /// reads as a real probe with a real empty identity.
+    #[cfg(feature = "hardware")]
     pub fn new(known: &EnrolledBoard, live_hardware_id: Option<String>, reason: String) -> Self {
         let occurred_at_utc_ms = super::enrollment::now_utc_ms();
         Alert {
             id: format!("{occurred_at_utc_ms:x}-{}", std::process::id()),
             occurred_at_utc_ms,
             role: known.role.clone(),
-            probe_serial: known.probe_serial.clone(),
+            probe_serial: known.probe_serial.clone().unwrap_or_else(|| "(none)".to_string()),
             chip: known.chip.clone(),
-            recorded_hardware_id: known.hardware_id.clone(),
+            recorded_hardware_id: known
+                .hardware_id
+                .clone()
+                .unwrap_or_else(|| "(none)".to_string()),
             live_hardware_id,
             reason,
         }
@@ -156,12 +190,12 @@ mod tests {
 
     fn sample_board() -> EnrolledBoard {
         EnrolledBoard {
-            probe_serial: "760001234".to_string(),
+            probe_serial: Some("760001234".to_string()),
             role: "dev-bench".to_string(),
             name: "bench-esp32c5".to_string(),
             chip: "esp32c5".to_string(),
-            hardware_id: "aaaaaaaabbbbbbbb".to_string(),
-            confirmed_at_utc_ms: 1_755_000_000_000,
+            hardware_id: Some("aaaaaaaabbbbbbbb".to_string()),
+            confirmed_at_utc_ms: Some(1_755_000_000_000),
             link_port_serial: None,
             link_port_interface: None,
         }

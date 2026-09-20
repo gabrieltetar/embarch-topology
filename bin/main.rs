@@ -66,6 +66,19 @@ enum Command {
         #[arg(long)]
         role: String,
     },
+    /// Declare which **board type** is in `role` — the shape a repo builds
+    /// for (`nrf54l15dk`), not a piece of hardware. Opens no probe: this
+    /// half of a role carries no identity claim, which is why it can be
+    /// declared with nothing plugged in. `validate` is what reads silicon.
+    SetBoard {
+        #[arg(long)]
+        role: String,
+        #[arg(long)]
+        board: String,
+        /// The probe-rs target that board type attaches as.
+        #[arg(long)]
+        chip: String,
+    },
     /// Re-verify an already-enrolled board's live identity, by role.
     Validate {
         #[arg(long)]
@@ -233,7 +246,11 @@ fn main() -> anyhow::Result<()> {
                 let name = if b.name.is_empty() { "(unnamed)" } else { b.name.as_str() };
                 print!(
                     "{}: {} probe {} chip {} hardware_id {}",
-                    b.role, name, b.probe_serial, b.chip, b.hardware_id
+                    b.role,
+                    name,
+                    b.probe_serial.as_deref().unwrap_or("(no probe)"),
+                    b.chip,
+                    b.hardware_id.as_deref().unwrap_or("(unread)")
                 );
                 if let Some(s) = &b.link_port_serial {
                     print!(" link_port_serial {s}");
@@ -253,8 +270,8 @@ fn main() -> anyhow::Result<()> {
                 "enrolled '{}' as role '{}': probe {}, hardware_id {}",
                 if board.name.is_empty() { board.chip.as_str() } else { board.name.as_str() },
                 board.role,
-                board.probe_serial,
-                board.hardware_id
+                board.probe_serial.as_deref().unwrap_or("(no probe)"),
+                board.hardware_id.as_deref().unwrap_or("(unread)")
             );
         }
         Command::Unenroll { role } => {
@@ -265,13 +282,29 @@ fn main() -> anyhow::Result<()> {
             match hardware::unenroll(&role)? {
                 Some(b) => println!(
                     "unenrolled role '{}': was probe {} chip {} hardware_id {}",
-                    b.role, b.probe_serial, b.chip, b.hardware_id
+                    b.role,
+                    b.probe_serial.as_deref().unwrap_or("(no probe)"),
+                    b.chip,
+                    b.hardware_id.as_deref().unwrap_or("(unread)")
                 ),
                 None => {
                     eprintln!("no board enrolled under role '{role}'");
                     std::process::exit(1);
                 }
             }
+        }
+        Command::SetBoard { role, board, chip } => {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+            refuse_if_core_reachable(&rt, "/probes/enrolled/{role}/board")?;
+            check_canonical_role(&role)?;
+            let row = hardware::set_role_board(&role, &board, &chip)?;
+            println!(
+                "role '{}' holds board type '{}' (chip {}), probe {}",
+                row.role,
+                row.name,
+                row.chip,
+                row.probe_serial.as_deref().unwrap_or("(none yet)")
+            );
         }
         Command::Validate { role } => {
             let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
@@ -280,7 +313,13 @@ fn main() -> anyhow::Result<()> {
             Ok(v) => println!(
                 "ok: '{}' still matches hardware_id {} (enrolled_confirmed_at_utc_ms {}, \
                  validated_at_utc_ms {})",
-                v.board.role, v.board.hardware_id, v.board.confirmed_at_utc_ms, v.validated_at_utc_ms
+                v.board.role,
+                v.board.hardware_id.as_deref().unwrap_or("(unread)"),
+                v.board
+                    .confirmed_at_utc_ms
+                    .map(|ms| ms.to_string())
+                    .unwrap_or_else(|| "(never)".to_string()),
+                v.validated_at_utc_ms
             ),
             Err(e) => {
                 eprintln!("{}", render_error(&e));

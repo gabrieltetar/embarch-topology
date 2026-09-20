@@ -52,15 +52,28 @@ pub fn is_canonical_role(role: &str) -> bool {
 /// board in a way a bare USB serial number can't.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EnrolledBoard {
-    pub probe_serial: String,
+    /// **Optional since `embarch-ui` decision 45.** A role holds two
+    /// independent bindings — which *probe* serves it, and which *board
+    /// type* is in it — and either can be declared without the other. A row
+    /// with no probe is a role whose board is known and whose silicon has
+    /// never been read: a real state, and the one a bench is in while it is
+    /// being set up.
+    ///
+    /// Deserializing an older store still works unchanged: a plain string
+    /// reads as `Some`.
+    #[serde(default)]
+    pub probe_serial: Option<String>,
     pub role: String,
-    /// The human's own name for the physical board currently holding
-    /// `role` — `client-nucleo`, `wearable-rev6` — and **opaque
-    /// here**: nothing in this crate reads it, compares it or requires it
-    /// to resolve to anything. It exists because `role` stopped being a
-    /// name (`embarch-ui` decision 44): two boards can hold the same role
-    /// on different days and the same chip string, and the only thing that
-    /// tells them apart in a table is what a human called them.
+    /// The **board type** in this role — `nrf54l15dk`, `esp32c5_devkitc`,
+    /// a board a firmware repo builds for. A *shape*, not a piece of
+    /// hardware: two identical DKs are one board type, and what tells the
+    /// two physical units apart is [`hardware_id`](Self::hardware_id),
+    /// read through whatever probe is on one of them.
+    ///
+    /// **Opaque here**: nothing in this crate reads it, compares it or
+    /// requires it to resolve to anything. It exists because `role` stopped
+    /// being a name (`embarch-ui` decision 44) and because a run has to
+    /// know what to build for (45).
     ///
     /// The catalog it names lives in a firmware repo
     /// (`embarch/boards.toml`), not on this machine, so a name written
@@ -75,10 +88,18 @@ pub struct EnrolledBoard {
     pub name: String,
     pub chip: String,
     /// The probe-read (JTAG) hardware ID — not the bench's self-reported
-    /// one. `embarch-core` decision 56.
-    pub hardware_id: String,
-    /// UTC milliseconds since the epoch.
-    pub confirmed_at_utc_ms: u64,
+    /// one. `embarch-core` decision 56. `None` exactly when
+    /// [`probe_serial`](Self::probe_serial) is: an identity read needs a
+    /// probe to read it through, so the two are one fact and are written
+    /// together by [`super::validate::enroll`].
+    #[serde(default)]
+    pub hardware_id: Option<String>,
+    /// UTC milliseconds since the epoch — when the probe half was last
+    /// written. `None` while there is no probe half, never `0`: a row that
+    /// has never been verified does not claim to have been verified at the
+    /// epoch.
+    #[serde(default)]
+    pub confirmed_at_utc_ms: Option<u64>,
     /// A separately declared USB serial number for this role's *runtime
     /// serial link* — meaningful only for [`super::port::DEV_BENCH_ROLE`],
     /// `None` for every other role. Exists because `probe_serial` above is
@@ -183,7 +204,10 @@ pub fn save_store(store: &Store) -> Result<()> {
 #[cfg(feature = "hardware")]
 pub fn find(probe_serial: &str) -> Result<Option<EnrolledBoard>> {
     let store = load_at(&paths::enrollment_path()?)?;
-    Ok(store.boards.into_iter().find(|b| b.probe_serial == probe_serial))
+    Ok(store
+        .boards
+        .into_iter()
+        .find(|b| b.probe_serial.as_deref() == Some(probe_serial)))
 }
 
 /// Look up an enrollment by `role` instead of `probe_serial` —
@@ -257,12 +281,69 @@ fn upsert_at(path: &Path, board: EnrolledBoard) -> Result<Option<EnrolledBoard>>
         .find(|b| b.role == board.role && b.probe_serial != board.probe_serial)
         .cloned();
 
-    store
-        .boards
-        .retain(|b| b.probe_serial != board.probe_serial && b.role != board.role);
+    // **A row with no probe is never treated as sharing one.** Matching on
+    // `Option` equality alone would make two boardless roles collide on
+    // `None == None` and silently delete each other, which is the state a
+    // bench is in the moment both roles have a board type and neither has
+    // been wired up yet.
+    let same_probe = |b: &EnrolledBoard| {
+        board.probe_serial.is_some() && b.probe_serial == board.probe_serial
+    };
+    store.boards.retain(|b| !same_probe(b) && b.role != board.role);
     store.boards.push(board);
     save_at(path, &store)?;
     Ok(displaced)
+}
+
+/// Declares **which board type is in `role`**, without opening anything
+/// (`embarch-ui` decision 45). The write behind `embarch-core`'s
+/// `PUT /probes/enrolled/{role}/board`.
+///
+/// **The half that carries no identity claim.** A board type is a shape a
+/// repo builds for; saying which one is in a role is a statement about the
+/// bench, not about silicon, so it needs no probe, no attach and no
+/// hardware ID — and it must work with nothing plugged in, which is when a
+/// bench is usually being described. The probe half
+/// ([`super::validate::enroll`]) is what reads an identity, and this
+/// function never touches it: an existing probe binding is carried across
+/// verbatim.
+///
+/// **Changing the board type does not clear the recorded hardware ID**, and
+/// deliberately: the ID is what the probe last read, a fact about a past
+/// read rather than a claim about the present. A role whose board type
+/// moved to different silicon now has a row whose halves disagree, and
+/// `POST /validate` is what says so — loudly, by name — rather than this
+/// function quietly erasing the evidence.
+#[cfg(feature = "hardware")]
+pub fn set_role_board(role: &str, name: &str, chip: &str) -> Result<EnrolledBoard> {
+    set_role_board_at(&paths::enrollment_path()?, role, name, chip)
+}
+
+/// [`set_role_board`]'s body against an explicit path — the same split
+/// [`upsert_at`] is under, and for the same reason.
+#[cfg(feature = "hardware")]
+fn set_role_board_at(path: &Path, role: &str, name: &str, chip: &str) -> Result<EnrolledBoard> {
+    let mut store = load_at(path)?;
+    if let Some(existing) = store.boards.iter_mut().find(|b| b.role == role) {
+        existing.name = name.to_string();
+        existing.chip = chip.to_string();
+        let updated = existing.clone();
+        save_at(path, &store)?;
+        return Ok(updated);
+    }
+    let row = EnrolledBoard {
+        probe_serial: None,
+        role: role.to_string(),
+        name: name.to_string(),
+        chip: chip.to_string(),
+        hardware_id: None,
+        confirmed_at_utc_ms: None,
+        link_port_serial: None,
+        link_port_interface: None,
+    };
+    store.boards.push(row.clone());
+    save_at(path, &store)?;
+    Ok(row)
 }
 
 /// Removes whatever board holds `role`, returning it. `Ok(None)` means
@@ -369,12 +450,12 @@ mod tests {
 
     fn sample(serial: &str) -> EnrolledBoard {
         EnrolledBoard {
-            probe_serial: serial.to_string(),
+            probe_serial: Some(serial.to_string()),
             role: DUT_ROLE.to_string(),
             name: "reference-dut-fw".to_string(),
             chip: "nRF54L15".to_string(),
-            hardware_id: "deadbeefcafef00d".to_string(),
-            confirmed_at_utc_ms: 1_755_000_000_000,
+            hardware_id: Some("deadbeefcafef00d".to_string()),
+            confirmed_at_utc_ms: Some(1_755_000_000_000),
             link_port_serial: None,
             link_port_interface: None,
         }
@@ -456,7 +537,7 @@ mod tests {
             "a role must be held by exactly one board"
         );
         let bench = boards.iter().find(|b| b.role == "dev-bench").unwrap();
-        assert_eq!(bench.probe_serial, "001057729826");
+        assert_eq!(bench.probe_serial.as_deref(), Some("001057729826"));
         assert_eq!(
             bench.link_port_serial, None,
             "the displaced board's link port must not be inherited by different hardware"
@@ -496,7 +577,7 @@ mod tests {
         save_at(&path, &store).unwrap();
 
         let mut updated = sample("same-serial");
-        updated.hardware_id = "a-new-hardware-id".to_string();
+        updated.hardware_id = Some("a-new-hardware-id".to_string());
         let mut reloaded = load_at(&path).unwrap();
         reloaded.boards.retain(|b| b.probe_serial != updated.probe_serial);
         reloaded.boards.push(updated.clone());
@@ -677,5 +758,100 @@ confirmed_at_utc_ms = 1755000000000
         assert!(!is_canonical_role("client-nucleo"));
         assert!(!is_canonical_role("DUT"), "the wire spelling is lowercase; the label is not");
         assert!(!is_canonical_role(""));
+    }
+
+    /// The board half writes with no probe, and the probe half is not
+    /// invented to make room for it.
+    #[test]
+    fn a_board_type_can_be_declared_for_a_role_with_no_probe() {
+        let dir = temp_path("set-board-empty-dir");
+        let path = dir.join("enrollment.toml");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let row = set_role_board_at(&path, DUT_ROLE, "nrf54l15dk", "nRF54L15").unwrap();
+        assert_eq!(row.name, "nrf54l15dk");
+        assert_eq!(row.probe_serial, None);
+        assert_eq!(row.hardware_id, None);
+        assert_eq!(row.confirmed_at_utc_ms, None, "never verified is not verified at the epoch");
+
+        let boards = load_at(&path).unwrap().boards;
+        assert_eq!(boards.len(), 1);
+        assert_eq!(boards[0].role, DUT_ROLE);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Changing the board type leaves the probe binding and the recorded
+    /// identity alone — the halves are independent, and a stale identity is
+    /// evidence for `validate` rather than something to erase.
+    #[test]
+    fn setting_a_board_type_keeps_the_probe_half_untouched() {
+        let dir = temp_path("set-board-keep-dir");
+        let path = dir.join("enrollment.toml");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut enrolled = sample("000852006107");
+        enrolled.name = "nrf54l15dk".to_string();
+        save_at(&path, &Store { boards: vec![enrolled.clone()], signals: Vec::new() }).unwrap();
+
+        let row = set_role_board_at(&path, DUT_ROLE, "client-nucleo", "STM32G0B1VE").unwrap();
+        assert_eq!(row.name, "client-nucleo");
+        assert_eq!(row.chip, "STM32G0B1VE");
+        assert_eq!(row.probe_serial, enrolled.probe_serial, "the probe binding is a separate fact");
+        assert_eq!(
+            row.hardware_id, enrolled.hardware_id,
+            "the recorded identity stays for validate to disagree with"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Two roles that each hold a board type and no probe must both
+    /// survive: matching on `Option` equality alone would make them
+    /// collide on `None == None`.
+    #[test]
+    fn two_boardless_roles_do_not_displace_each_other() {
+        let dir = temp_path("boardless-roles-dir");
+        let path = dir.join("enrollment.toml");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        set_role_board_at(&path, DUT_ROLE, "nrf54l15dk", "nRF54L15").unwrap();
+        set_role_board_at(&path, super::super::port::DEV_BENCH_ROLE, "esp32c5_devkitc", "esp32c5")
+            .unwrap();
+
+        let boards = load_at(&path).unwrap().boards;
+        assert_eq!(boards.len(), 2, "{boards:?}");
+
+        // And an enrol into one of them, with a probe, still leaves the other.
+        let mut enrolled = sample("000852006107");
+        enrolled.name = "nrf54l15dk".to_string();
+        upsert_at(&path, enrolled).unwrap();
+        let boards = load_at(&path).unwrap().boards;
+        assert_eq!(boards.len(), 2, "{boards:?}");
+        assert_eq!(
+            boards.iter().filter(|b| b.probe_serial.is_none()).count(),
+            1,
+            "the bench role keeps its boardless row"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A store written before the probe half became optional still loads,
+    /// with both halves present.
+    #[test]
+    fn a_pre_optional_probe_store_still_loads() {
+        let toml = r#"
+[[boards]]
+probe_serial = "000852006107"
+role = "dut"
+chip = "nRF54L15"
+hardware_id = "deadbeefcafef00d"
+confirmed_at_utc_ms = 1755000000000
+"#;
+        let store: Store = toml::from_str(toml).expect("an older store must still load");
+        assert_eq!(store.boards[0].probe_serial.as_deref(), Some("000852006107"));
+        assert_eq!(store.boards[0].hardware_id.as_deref(), Some("deadbeefcafef00d"));
+        assert_eq!(store.boards[0].confirmed_at_utc_ms, Some(1_755_000_000_000));
     }
 }

@@ -39,7 +39,7 @@ pub use signal::{
     Route, SignalDirection, SignalLink, SignalMismatch, SignalNotDeclared,
 };
 #[cfg(feature = "hardware")]
-pub use validate::{AttachedProbe, NotEnrolled, TopologyMismatch, Validation};
+pub use validate::{AttachedProbe, NoProbeBound, NotEnrolled, TopologyMismatch, Validation};
 
 /// Recent alerts from the durable log — `embarch-topology`'s own UI/CLI
 /// listing, and what a `doctor`-style check reports as evidence rather than
@@ -177,6 +177,18 @@ pub fn enroll(
     name: &str,
 ) -> anyhow::Result<EnrolledBoard> {
     validate::enroll(role, chip, probe_serial, name)
+}
+
+/// Declares **which board type is in `role`** — a shape a repo builds for,
+/// not a piece of hardware — without opening a probe (`embarch-ui` decision
+/// 45). The write behind `embarch-core`'s
+/// `PUT /probes/enrolled/{role}/board`. See
+/// [`enrollment::set_role_board`] for why this half carries no identity
+/// claim and why it deliberately leaves a stale `hardware_id` in place for
+/// `validate` to find.
+#[cfg(feature = "hardware")]
+pub fn set_role_board(role: &str, name: &str, chip: &str) -> anyhow::Result<EnrolledBoard> {
+    enrollment::set_role_board(role, name, chip)
 }
 
 /// Retracts whatever board holds `role`, returning it; `Ok(None)` when

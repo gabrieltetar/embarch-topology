@@ -172,8 +172,20 @@ impl std::fmt::Display for TopologyMismatch {
 
 impl std::error::Error for TopologyMismatch {}
 
-fn raise(known: &EnrolledBoard, live_hardware_id: Option<String>, reason: String) -> anyhow::Error {
-    let alert = Alert::new(known, live_hardware_id.clone(), reason.clone());
+fn raise(
+    known: &EnrolledBoard,
+    probe_serial: &str,
+    recorded_hardware_id: &str,
+    live_hardware_id: Option<String>,
+    reason: String,
+) -> anyhow::Error {
+    let alert = Alert::from_validation(
+        known,
+        probe_serial.to_string(),
+        recorded_hardware_id.to_string(),
+        live_hardware_id.clone(),
+        reason.clone(),
+    );
     if let Err(e) = alert::record(&alert) {
         // A logging failure must never mask the real mismatch underneath it
         // — surface both, but still return the mismatch as the actual error.
@@ -181,9 +193,9 @@ fn raise(known: &EnrolledBoard, live_hardware_id: Option<String>, reason: String
     }
     anyhow::Error::new(TopologyMismatch {
         role: known.role.clone(),
-        probe_serial: known.probe_serial.clone(),
+        probe_serial: probe_serial.to_string(),
         chip: known.chip.clone(),
-        recorded_hardware_id: known.hardware_id.clone(),
+        recorded_hardware_id: recorded_hardware_id.to_string(),
         live_hardware_id,
         reason,
         fix_it_url: alert::fix_it_url(),
@@ -215,6 +227,34 @@ impl std::fmt::Display for NotEnrolled {
 
 impl std::error::Error for NotEnrolled {}
 
+/// The role exists and names a board type, but **no probe is bound to it**
+/// (`embarch-ui` decision 45) — so there is nothing to read an identity
+/// through. Distinct from [`NotEnrolled`] (the role is not set up at all)
+/// and from [`TopologyMismatch`] (something was read and disagreed): this
+/// is "the half that would answer has not been declared yet", and a caller
+/// that folded it into either of the others would either invent a bench
+/// problem or hide a setup step.
+#[derive(Debug)]
+pub struct NoProbeBound {
+    pub role: String,
+    /// The board type in the role, so the message can name what is waiting
+    /// for a probe rather than just the role.
+    pub board: String,
+}
+
+impl std::fmt::Display for NoProbeBound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let board = if self.board.is_empty() { "no board type" } else { self.board.as_str() };
+        write!(
+            f,
+            "role '{}' holds {} but no probe — drop a probe on it before anything can read its              identity",
+            self.role, board
+        )
+    }
+}
+
+impl std::error::Error for NoProbeBound {}
+
 /// A live `validate` call's full result: the enrolled record — whose own
 /// `confirmed_at_utc_ms` names *enrolment* time, unmoving until someone
 /// re-enrolls — paired with `validated_at_utc_ms`, the instant *this* live
@@ -239,20 +279,44 @@ pub struct Validation {
 }
 
 fn validate_known_timed(known: EnrolledBoard) -> Result<(EnrolledBoard, u64)> {
+    // The probe half, or the reason there is nothing to validate. Both
+    // fields are written together by `enroll`, so a row carrying one
+    // without the other is hand-edited — named as such rather than
+    // defaulted into an empty serial nothing will ever match.
+    let (serial, recorded_hardware_id) = match (&known.probe_serial, &known.hardware_id) {
+        (Some(serial), Some(id)) => (serial.clone(), id.clone()),
+        (None, _) => {
+            return Err(anyhow::Error::new(NoProbeBound {
+                role: known.role.clone(),
+                board: known.name.clone(),
+            }))
+        }
+        (Some(_), None) => {
+            return Err(anyhow::Error::new(NoProbeBound {
+                role: known.role.clone(),
+                board: known.name.clone(),
+            })
+            .context(
+                "the enrollment row has a probe but no recorded hardware ID; re-enrol the role",
+            ))
+        }
+    };
     let lister = Lister::new();
     let probe_info = match lister
         .list_all()
         .into_iter()
-        .find(|p| p.serial_number.as_deref() == Some(known.probe_serial.as_str()))
+        .find(|p| p.serial_number.as_deref() == Some(serial.as_str()))
     {
         Some(p) => p,
         None => {
             return Err(raise(
                 &known,
+                &serial,
+                &recorded_hardware_id,
                 None,
                 format!(
                     "probe '{}' enrolled as role '{}' is not currently attached",
-                    known.probe_serial, known.role
+                    serial, known.role
                 ),
             ))
         }
@@ -263,30 +327,40 @@ fn validate_known_timed(known: EnrolledBoard) -> Result<(EnrolledBoard, u64)> {
         Err(e) => {
             return Err(raise(
                 &known,
+                &serial,
+                &recorded_hardware_id,
                 None,
                 format!(
                     "probe '{}' enrolled as role '{}' is attached but could not be opened ({e}) \
                      — another process may be holding it, the OS may be denying permission, or \
                      it may be a half-wedged debug probe; close other tools that might have it \
                      open, or unplug and replug it, then retry",
-                    known.probe_serial, known.role
+                    serial, known.role
                 ),
             ))
         }
     };
     if let Err(e) = check_target_powered(&mut probe) {
-        return Err(raise(&known, None, format!("can't validate role '{}': {e}", known.role)));
+        return Err(raise(
+            &known,
+            &serial,
+            &recorded_hardware_id,
+            None,
+            format!("can't validate role '{}': {e}", known.role),
+        ));
     }
     let mut session = match probe.attach(known.chip.as_str(), Permissions::default()) {
         Ok(session) => session,
         Err(e) => {
             return Err(raise(
                 &known,
+                &serial,
+                &recorded_hardware_id,
                 None,
                 format!(
                     "probe '{}' enrolled as role '{}' opened but failed to attach to chip '{}' \
                      ({e})",
-                    known.probe_serial, known.role, known.chip
+                    serial, known.role, known.chip
                 ),
             ))
         }
@@ -296,11 +370,13 @@ fn validate_known_timed(known: EnrolledBoard) -> Result<(EnrolledBoard, u64)> {
         Err(e) => {
             return Err(raise(
                 &known,
+                &serial,
+                &recorded_hardware_id,
                 None,
                 format!(
                     "probe '{}' enrolled as role '{}' attached to chip '{}' but failed to select \
                      core 0 ({e})",
-                    known.probe_serial, known.role, known.chip
+                    serial, known.role, known.chip
                 ),
             ))
         }
@@ -310,11 +386,13 @@ fn validate_known_timed(known: EnrolledBoard) -> Result<(EnrolledBoard, u64)> {
         Err(e) => {
             return Err(raise(
                 &known,
+                &serial,
+                &recorded_hardware_id,
                 None,
                 format!(
                     "probe '{}' enrolled as role '{}' attached to chip '{}' but failed to read \
                      its hardware ID ({e})",
-                    known.probe_serial, known.role, known.chip
+                    serial, known.role, known.chip
                 ),
             ))
         }
@@ -322,14 +400,16 @@ fn validate_known_timed(known: EnrolledBoard) -> Result<(EnrolledBoard, u64)> {
     drop(core);
     drop(session);
 
-    if live_hardware_id != known.hardware_id {
+    if live_hardware_id != recorded_hardware_id {
         return Err(raise(
             &known,
+            &serial,
+            &recorded_hardware_id,
             Some(live_hardware_id.clone()),
             format!(
                 "probe '{}' is enrolled as role '{}' (chip '{}') with hardware ID '{}', but the \
                  attached chip now reports '{live_hardware_id}' — re-enroll if this is deliberate",
-                known.probe_serial, known.role, known.chip, known.hardware_id
+                serial, known.role, known.chip, recorded_hardware_id
             ),
         ));
     }
@@ -521,15 +601,15 @@ pub fn enroll(
     let link_port_interface = prior.and_then(|b| b.link_port_interface);
 
     let board = EnrolledBoard {
-        probe_serial: serial,
+        probe_serial: Some(serial),
         role: role.to_string(),
         // Recorded verbatim, including empty: a caller that has no name for
         // this board says so by sending none, and an empty name renders as
         // "unnamed", never as a name this crate made up out of the chip.
         name: name.to_string(),
         chip: chip.to_string(),
-        hardware_id,
-        confirmed_at_utc_ms: enrollment::now_utc_ms(),
+        hardware_id: Some(hardware_id),
+        confirmed_at_utc_ms: Some(enrollment::now_utc_ms()),
         link_port_serial,
         link_port_interface,
     };
@@ -544,12 +624,12 @@ pub fn enroll(
             "role '{}' moved from probe {} (chip {}, hardware_id {}) to probe {} (chip {}, \
              hardware_id {}); the old board is no longer enrolled under any role",
             board.role,
-            displaced.probe_serial,
+            displaced.probe_serial.as_deref().unwrap_or("(none)"),
             displaced.chip,
-            displaced.hardware_id,
-            board.probe_serial,
+            displaced.hardware_id.as_deref().unwrap_or("(none)"),
+            board.probe_serial.as_deref().unwrap_or("(none)"),
             board.chip,
-            board.hardware_id,
+            board.hardware_id.as_deref().unwrap_or("(none)"),
         );
     }
     Ok(board)
@@ -561,12 +641,12 @@ mod tests {
 
     fn board() -> EnrolledBoard {
         EnrolledBoard {
-            probe_serial: "serial".into(),
+            probe_serial: Some("serial".into()),
             role: "dev-bench".into(),
             name: "bench-nrf54l15dk".into(),
             chip: "nRF54L15".into(),
-            hardware_id: "6fcddc36cb781b71".into(),
-            confirmed_at_utc_ms: 1_788_195_194_573,
+            hardware_id: Some("6fcddc36cb781b71".into()),
+            confirmed_at_utc_ms: Some(1_788_195_194_573),
             link_port_serial: None,
             link_port_interface: None,
         }
