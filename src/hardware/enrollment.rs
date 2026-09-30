@@ -152,6 +152,10 @@ pub struct Store {
     /// existed keeps loading, exactly as `link_port_serial` does.
     #[serde(default)]
     pub signals: Vec<super::signal::SignalLink>,
+    /// Declared bootload ports (decision 36). Skipped when empty, so a store
+    /// that never declared one is rewritten byte-for-byte as it was.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bootload_ports: Vec<super::bootload::BootloadPorts>,
 }
 
 #[cfg(feature = "hardware")]
@@ -476,7 +480,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
 
         let board = sample("000852006107");
-        save_at(&path, &Store { boards: vec![board.clone()], signals: Vec::new() }).unwrap();
+        save_at(&path, &Store { boards: vec![board.clone()], signals: Vec::new(), ..Store::default() }).unwrap();
 
         let found = load_at(&path).unwrap().boards.into_iter().find(|b| b.probe_serial == board.probe_serial);
         assert_eq!(found, Some(board));
@@ -493,7 +497,7 @@ mod tests {
         let mut dev_bench = sample("D0:CF:13:ED:F9:30");
         dev_bench.role = "dev-bench".to_string();
         dev_bench.chip = "esp32c5".to_string();
-        save_at(&path, &Store { boards: vec![sample("000852006107"), dev_bench.clone()], signals: Vec::new() }).unwrap();
+        save_at(&path, &Store { boards: vec![sample("000852006107"), dev_bench.clone()], signals: Vec::new(), ..Store::default() }).unwrap();
 
         let found = load_at(&path).unwrap().boards.into_iter().find(|b| b.role == "dev-bench");
         assert_eq!(found, Some(dev_bench));
@@ -520,7 +524,7 @@ mod tests {
         old_bench.chip = "esp32c5".to_string();
         old_bench.link_port_serial = Some("D607104BD96EF0119D5C489B1045C30F".to_string());
         let dut = sample("000852006107");
-        save_at(&path, &Store { boards: vec![old_bench.clone(), dut.clone()], signals: Vec::new() })
+        save_at(&path, &Store { boards: vec![old_bench.clone(), dut.clone()], signals: Vec::new(), ..Store::default() })
             .unwrap();
 
         let mut new_bench = sample("001057729826");
@@ -622,7 +626,7 @@ mod tests {
         dev_bench.role = "dev-bench".to_string();
         dev_bench.chip = "esp32c5".to_string();
         dev_bench.link_port_serial = Some("D607104BD96EF0119D5C489B1045C30F".to_string());
-        save_at(&path, &Store { boards: vec![dev_bench], signals: Vec::new() }).unwrap();
+        save_at(&path, &Store { boards: vec![dev_bench], signals: Vec::new(), ..Store::default() }).unwrap();
 
         // Reimplement clear_link_port_serial against the temp path directly
         // — the real fn goes through paths::enrollment_path(), not
@@ -647,7 +651,7 @@ mod tests {
         let mut dev_bench = sample("001057729826");
         dev_bench.role = "dev-bench".to_string();
         dev_bench.link_port_interface = Some(2);
-        save_at(&path, &Store { boards: vec![dev_bench], signals: Vec::new() }).unwrap();
+        save_at(&path, &Store { boards: vec![dev_bench], signals: Vec::new(), ..Store::default() }).unwrap();
 
         let mut store = load_at(&path).unwrap();
         store.boards.iter_mut().find(|b| b.role == "dev-bench").unwrap().link_port_interface = None;
@@ -668,7 +672,7 @@ mod tests {
         let mut dev_bench = sample("D0:CF:13:ED:F9:30");
         dev_bench.role = "dev-bench".to_string();
         dev_bench.chip = "esp32c5".to_string();
-        save_at(&path, &Store { boards: vec![dev_bench], signals: Vec::new() }).unwrap();
+        save_at(&path, &Store { boards: vec![dev_bench], signals: Vec::new(), ..Store::default() }).unwrap();
 
         // Reimplement set_link_port_serial against the temp path directly —
         // the real fn goes through paths::enrollment_path(), not overridable
@@ -704,7 +708,7 @@ mod tests {
         let keeper = sample("000852006107");
         save_at(
             &path,
-            &Store { boards: vec![first.clone(), second, keeper.clone()], signals: Vec::new() },
+            &Store { boards: vec![first.clone(), second, keeper.clone()], signals: Vec::new(), ..Store::default() },
         )
         .unwrap();
 
@@ -723,7 +727,7 @@ mod tests {
         let path = dir.join("enrollment.toml");
         let _ = std::fs::remove_dir_all(&dir);
 
-        save_at(&path, &Store { boards: vec![sample("000852006107")], signals: Vec::new() })
+        save_at(&path, &Store { boards: vec![sample("000852006107")], signals: Vec::new(), ..Store::default() })
             .unwrap();
         let before = std::fs::read_to_string(&path).unwrap();
 
@@ -792,7 +796,7 @@ confirmed_at_utc_ms = 1755000000000
 
         let mut enrolled = sample("000852006107");
         enrolled.name = "nrf54l15dk".to_string();
-        save_at(&path, &Store { boards: vec![enrolled.clone()], signals: Vec::new() }).unwrap();
+        save_at(&path, &Store { boards: vec![enrolled.clone()], signals: Vec::new(), ..Store::default() }).unwrap();
 
         let row = set_role_board_at(&path, DUT_ROLE, "client-nucleo", "STM32G0B1VE").unwrap();
         assert_eq!(row.name, "client-nucleo");

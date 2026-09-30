@@ -15,6 +15,7 @@
 //! seven types the compiler had no way to compare against their originals.
 
 mod alert;
+pub mod bootload;
 mod enrollment;
 #[cfg(feature = "hardware")]
 pub mod hardware_id;
@@ -26,6 +27,7 @@ pub mod signal;
 mod validate;
 
 pub use alert::{Alert, UI_HOST, UI_PORT};
+pub use bootload::{AmbiguousUsbPort, BootloadPorts, UsbPortId};
 pub use enrollment::{is_canonical_role, EnrolledBoard, CANONICAL_ROLES, DUT_ROLE};
 #[cfg(feature = "hardware")]
 pub use hardware_id::{compare_self_reported, SelfReportedIdentity};
