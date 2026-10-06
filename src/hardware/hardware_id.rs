@@ -314,20 +314,66 @@ fn esp32c5_expected_self_report(jtag_read: &str) -> Option<String> {
 /// two-word slice this emits byte-identical output to the old function, so
 /// every hardware ID already recorded in `enrollment.toml` still compares
 /// equal and no enrolled board needs re-enrolling.
+///
+/// **An ID read back as all zeros or all ones is a failed read, not an ID
+/// (decision 38).** No factory-burned ID is either, and on 2026-09-12 a
+/// NUCLEO-G0B1RE read `000000000000000000000000` three times in a minute
+/// against its enrolled `00250010343650172037334b`, then read correctly on
+/// 2026-10-06 with the same probe-rs and the same addresses, under reset and
+/// out of it. Reported as a mismatch, that read accused a correct board of
+/// being a different one and blocked flash and reset on it; reported as a
+/// failed read, it says what actually happened. One retry first, since the
+/// cause was transient.
 fn read_words(core: &mut Core<'_>, addresses: &[u64], name: &str) -> Result<String> {
-    let mut out = String::with_capacity(addresses.len() * 8);
-    for (i, &address) in addresses.iter().enumerate() {
-        let word = core
-            .read_word_32(address)
-            .with_context(|| format!("failed to read {name}[{i}] at {address:#x}"))?;
-        out.push_str(&format!("{word:08x}"));
+    let mut words = read_once(core, addresses, name)?;
+    if implausible(&words).is_some() {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        words = read_once(core, addresses, name)?;
     }
-    Ok(out)
+    if let Some(what) = implausible(&words) {
+        anyhow::bail!(
+            "{name} read back as all {what} twice: the target did not return its ID (held in \
+             reset, in a low-power state, or the probe busy with something else). That is a \
+             failed read, not a different board"
+        );
+    }
+    Ok(words.iter().map(|w| format!("{w:08x}")).collect())
+}
+
+fn read_once(core: &mut Core<'_>, addresses: &[u64], name: &str) -> Result<Vec<u32>> {
+    addresses
+        .iter()
+        .enumerate()
+        .map(|(i, &address)| {
+            core.read_word_32(address)
+                .with_context(|| format!("failed to read {name}[{i}] at {address:#x}"))
+        })
+        .collect()
+}
+
+/// `Some("zeros")`/`Some("ones")` when the words cannot be a factory ID.
+fn implausible(words: &[u32]) -> Option<&'static str> {
+    if words.iter().all(|&w| w == 0) {
+        Some("zeros")
+    } else if words.iter().all(|&w| w == u32::MAX) {
+        Some("ones")
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_all_zero_or_all_ones_id_is_a_failed_read_not_an_id() {
+        assert_eq!(implausible(&[0, 0, 0]), Some("zeros"));
+        assert_eq!(implausible(&[u32::MAX, u32::MAX]), Some("ones"));
+        // The real Nucleo's UID, and any ID with one zero word, are IDs.
+        assert_eq!(implausible(&[0x0025_0010, 0x3436_5017, 0x2037_334b]), None);
+        assert_eq!(implausible(&[0, 0x1234, 0]), None);
+    }
 
     #[test]
     fn identical_ids_match_for_any_chip_without_needing_a_declared_relation() {

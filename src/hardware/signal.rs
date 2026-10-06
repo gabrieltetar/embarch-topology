@@ -28,8 +28,15 @@
 //!
 //! **Scope is deliberately narrow, matching decisions 10/11:** signals are
 //! an extensible table, not a hardcoded list, but there is no logic here for
-//! a signal fanning out to two destinations, for a signal between two DUTs,
-//! or for driving a `HostToDut` stimulus line. None of those are real yet.
+//! a signal fanning out to two destinations or for a signal between two
+//! DUTs. None of those are real yet.
+//!
+//! **Host-to-DUT on a `Direct` route is real (decision 37):** a signal
+//! declared [`HostToDut`](SignalDirection::HostToDut) or
+//! [`Bidirectional`](SignalDirection::Bidirectional) may be written by Core
+//! ([`SignalLink::host_can_write`]), which is what a DUT shell needs. A
+//! `ViaDevBench` route still cannot be written: that needs dev-bench's own
+//! write action, which does not exist yet.
 
 #[cfg(feature = "hardware")]
 use anyhow::{Context, Result};
@@ -56,6 +63,25 @@ pub struct SignalLink {
     pub origin_role: String,
     pub direction: SignalDirection,
     pub route: Route,
+    /// The line rate this signal runs at, when it is not Core's default
+    /// (`EMBARCH_SIGNAL_BAUD`, 1 Mbaud): a DUT console at 115200 next to an
+    /// outpost at 1 Mbaud is two signals with two rates (decision 37).
+    /// Absent in every row declared before it existed, which keeps the
+    /// default, so no enrollment file needs migrating. A USB CDC ACM port
+    /// ignores the rate; declaring it is harmless.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baud: Option<u32>,
+}
+
+impl SignalLink {
+    /// Whether Core may write to this signal: its direction carries bytes
+    /// toward the DUT, and its route ends on a port Core opens itself
+    /// (decision 37). A `ViaDevBench` route is refused here even when its
+    /// direction allows it, because the relay has no write path yet.
+    pub fn host_can_write(&self) -> bool {
+        matches!(self.direction, SignalDirection::HostToDut | SignalDirection::Bidirectional)
+            && matches!(self.route, Route::Direct { .. })
+    }
 }
 
 /// Which way a signal travels. The outpost is [`DutToHost`](Self::DutToHost)
@@ -300,7 +326,53 @@ mod tests {
             origin_role: "dut".to_string(),
             direction: SignalDirection::DutToHost,
             route: Route::Direct { port_serial: "FT9ABCDE".to_string() },
+            baud: None,
         }
+    }
+
+    #[test]
+    fn only_a_direct_route_toward_the_dut_is_writable() {
+        // Decision 37: the outpost is TX-only, so Core must never write to it;
+        // a console declared bidirectional on its own port may be written; a
+        // relayed one may not, whatever its direction, until dev-bench has a
+        // write path.
+        assert!(!outpost_link().host_can_write());
+        let console = SignalLink {
+            name: "console".to_string(),
+            direction: SignalDirection::Bidirectional,
+            baud: Some(115_200),
+            ..outpost_link()
+        };
+        assert!(console.host_can_write());
+        assert!(SignalLink { direction: SignalDirection::HostToDut, ..outpost_link() }.host_can_write());
+        let relayed = SignalLink {
+            route: Route::ViaDevBench { rx_pin: "P0.04".to_string(), tx_pin: "P0.05".to_string() },
+            ..console
+        };
+        assert!(!relayed.host_can_write());
+    }
+
+    #[test]
+    fn a_row_declared_before_baud_existed_loads_with_the_default_and_round_trips_without_it() {
+        // Every enrollment.toml already on disk has signal rows with no
+        // `baud` key; they must load as "Core's default", and writing one
+        // back must not grow a `baud` key nobody declared.
+        let old = r#"
+[[signals]]
+name = "outpost"
+origin_role = "dut"
+direction = "dut-to-host"
+
+[signals.route]
+kind = "direct"
+port_serial = "FT9ABCDE"
+"#;
+        let store: Store = toml::from_str(old).unwrap();
+        assert_eq!(store.signals[0].baud, None);
+        assert!(!toml::to_string_pretty(&store).unwrap().contains("baud"));
+        let with = Store { signals: vec![SignalLink { baud: Some(115_200), ..outpost_link() }] };
+        let back: Store = toml::from_str(&toml::to_string_pretty(&with).unwrap()).unwrap();
+        assert_eq!(back.signals[0].baud, Some(115_200));
     }
 
     #[test]
