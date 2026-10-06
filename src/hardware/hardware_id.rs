@@ -324,7 +324,8 @@ fn esp32c5_expected_self_report(jtag_read: &str) -> Option<String> {
 /// out of it. Reported as a mismatch, that read accused a correct board of
 /// being a different one and blocked flash and reset on it; reported as a
 /// failed read, it says what actually happened. One retry first, since the
-/// cause was transient. **Widened 2026-10-06** from all-zeros/all-ones to
+/// cause was transient. **Then a halted read (decision 39)**, which is always good, before
+/// giving up. **Widened 2026-10-06** from all-zeros/all-ones to
 /// any repeated word: an STM32G0 DUT asleep with its system bus unclocked
 /// (DHCSR `S_SLEEP`) read `00000e80` three times through probe-rs and J-Link
 /// alike, and enrolment recorded that as its ID.
@@ -334,6 +335,9 @@ fn read_words(core: &mut Core<'_>, addresses: &[u64], name: &str) -> Result<Stri
         std::thread::sleep(std::time::Duration::from_millis(50));
         words = read_once(core, addresses, name)?;
     }
+    if implausible(&words).is_some() {
+        words = read_halted(core, addresses, name)?;
+    }
     if let Some(what) = implausible(&words) {
         anyhow::bail!(
             "{name} read back as {what} twice: the target did not return its ID (asleep with its \
@@ -342,6 +346,23 @@ fn read_words(core: &mut Core<'_>, addresses: &[u64], name: &str) -> Result<Stri
         );
     }
     Ok(words.iter().map(|w| format!("{w:08x}")).collect())
+}
+
+/// The ID read with the core halted, then let run again if it was running (decision 39): a
+/// debug read of the system bus is always good on a halted core, and an STM32G0 idling in WFI
+/// with no DMA clock on answers every running read with 0 or a stale word. The halt lasts the
+/// three reads.
+fn read_halted(core: &mut Core<'_>, addresses: &[u64], name: &str) -> Result<Vec<u32>> {
+    let was_halted = core.core_halted().context("failed to read whether the core is halted")?;
+    if !was_halted {
+        core.halt(std::time::Duration::from_millis(100))
+            .context("failed to halt the core for an ID read")?;
+    }
+    let words = read_once(core, addresses, name);
+    if !was_halted {
+        core.run().context("failed to let the core run again after the ID read")?;
+    }
+    words
 }
 
 fn read_once(core: &mut Core<'_>, addresses: &[u64], name: &str) -> Result<Vec<u32>> {

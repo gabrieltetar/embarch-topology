@@ -15,6 +15,8 @@
 //! seven types the compiler had no way to compare against their originals.
 
 mod alert;
+#[cfg(feature = "hardware")]
+pub mod attach;
 pub mod bootload;
 mod enrollment;
 #[cfg(feature = "hardware")]

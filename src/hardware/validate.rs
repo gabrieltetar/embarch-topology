@@ -349,7 +349,7 @@ fn validate_known_timed(known: EnrolledBoard) -> Result<(EnrolledBoard, u64)> {
             format!("can't validate role '{}': {e}", known.role),
         ));
     }
-    let mut session = match probe.attach(known.chip.as_str(), Permissions::default()) {
+    let mut session = match super::attach::attach(probe, known.chip.as_str(), Permissions::default()) {
         Ok(session) => session,
         Err(e) => {
             return Err(raise(
@@ -581,8 +581,7 @@ pub fn enroll(
 
     let mut probe = info.open().context("failed to open the attached debug probe")?;
     check_target_powered(&mut probe).context("can't enroll")?;
-    let mut session = probe
-        .attach(chip, Permissions::default())
+    let mut session = super::attach::attach(probe, chip, Permissions::default())
         .with_context(|| format!("failed to attach to '{chip}'"))?;
     let mut core = session.core(0).context("failed to select core 0")?;
     let hardware_id = hardware_id::read(&mut core, chip)?;
