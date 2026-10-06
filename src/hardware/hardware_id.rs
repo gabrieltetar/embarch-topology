@@ -315,15 +315,19 @@ fn esp32c5_expected_self_report(jtag_read: &str) -> Option<String> {
 /// every hardware ID already recorded in `enrollment.toml` still compares
 /// equal and no enrolled board needs re-enrolling.
 ///
-/// **An ID read back as all zeros or all ones is a failed read, not an ID
-/// (decision 38).** No factory-burned ID is either, and on 2026-09-12 a
+/// **An ID whose words are all the same is a failed read, not an ID
+/// (decision 38)** — all zeros, all ones, or one stale bus value repeated.
+/// No factory-burned ID is any of those, and on 2026-09-12 a
 /// NUCLEO-G0B1RE read `000000000000000000000000` three times in a minute
 /// against its enrolled `00250010343650172037334b`, then read correctly on
 /// 2026-10-06 with the same probe-rs and the same addresses, under reset and
 /// out of it. Reported as a mismatch, that read accused a correct board of
 /// being a different one and blocked flash and reset on it; reported as a
 /// failed read, it says what actually happened. One retry first, since the
-/// cause was transient.
+/// cause was transient. **Widened 2026-10-06** from all-zeros/all-ones to
+/// any repeated word: an STM32G0 DUT asleep with its system bus unclocked
+/// (DHCSR `S_SLEEP`) read `00000e80` three times through probe-rs and J-Link
+/// alike, and enrolment recorded that as its ID.
 fn read_words(core: &mut Core<'_>, addresses: &[u64], name: &str) -> Result<String> {
     let mut words = read_once(core, addresses, name)?;
     if implausible(&words).is_some() {
@@ -332,9 +336,9 @@ fn read_words(core: &mut Core<'_>, addresses: &[u64], name: &str) -> Result<Stri
     }
     if let Some(what) = implausible(&words) {
         anyhow::bail!(
-            "{name} read back as all {what} twice: the target did not return its ID (held in \
-             reset, in a low-power state, or the probe busy with something else). That is a \
-             failed read, not a different board"
+            "{name} read back as {what} twice: the target did not return its ID (asleep with its \
+             system bus unclocked, held in reset, or the probe busy with something else). That is \
+             a failed read, not a different board"
         );
     }
     Ok(words.iter().map(|w| format!("{w:08x}")).collect())
@@ -351,15 +355,18 @@ fn read_once(core: &mut Core<'_>, addresses: &[u64], name: &str) -> Result<Vec<u
         .collect()
 }
 
-/// `Some("zeros")`/`Some("ones")` when the words cannot be a factory ID.
-fn implausible(words: &[u32]) -> Option<&'static str> {
-    if words.iter().all(|&w| w == 0) {
-        Some("zeros")
-    } else if words.iter().all(|&w| w == u32::MAX) {
-        Some("ones")
-    } else {
-        None
+/// What the words read back as, when they cannot be a factory ID: every word
+/// the same (zeros, ones, or one stale value repeated).
+fn implausible(words: &[u32]) -> Option<String> {
+    let first = *words.first()?;
+    if words.len() < 2 || words.iter().any(|&w| w != first) {
+        return None;
     }
+    Some(match first {
+        0 => "all zeros".to_string(),
+        u32::MAX => "all ones".to_string(),
+        w => format!("{w:08x} in every word"),
+    })
 }
 
 #[cfg(test)]
@@ -367,12 +374,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_all_zero_or_all_ones_id_is_a_failed_read_not_an_id() {
-        assert_eq!(implausible(&[0, 0, 0]), Some("zeros"));
-        assert_eq!(implausible(&[u32::MAX, u32::MAX]), Some("ones"));
-        // The real Nucleo's UID, and any ID with one zero word, are IDs.
+    fn an_id_with_every_word_the_same_is_a_failed_read_not_an_id() {
+        assert_eq!(implausible(&[0, 0, 0]).as_deref(), Some("all zeros"));
+        assert_eq!(implausible(&[u32::MAX, u32::MAX]).as_deref(), Some("all ones"));
+        // What a sleeping STM32G0 DUT gave probe-rs on 2026-10-06.
+        assert_eq!(implausible(&[0xe80, 0xe80, 0xe80]).as_deref(), Some("00000e80 in every word"));
+        // The real Nucleo's UID, and any ID with one differing word, are IDs.
         assert_eq!(implausible(&[0x0025_0010, 0x3436_5017, 0x2037_334b]), None);
         assert_eq!(implausible(&[0, 0x1234, 0]), None);
+        assert_eq!(implausible(&[0x1234]), None);
     }
 
     #[test]
