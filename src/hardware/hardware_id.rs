@@ -123,7 +123,17 @@ pub fn read(core: &mut Core<'_>, chip: &str) -> Result<String> {
         Some(ChipFamily::NrfClassicDeviceId) => {
             read_words(core, &NRF5X_FICR_DEVICEID, "FICR.DEVICEID")
         }
-        Some(ChipFamily::Stm32G0Uid) => read_words(core, &STM32G0_UID, "UID"),
+        // Always halted (decision 39): a running G0 that idles in WFI with no DMA clock on answers
+        // debug reads with 0 or a stale word, and not always all three alike — on 2026-10-06 a
+        // running read came back `0000c000 4d4d5003 00008000`, one word right, which no
+        // plausibility check can tell from a different board.
+        Some(ChipFamily::Stm32G0Uid) => {
+            let words = read_halted(core, &STM32G0_UID, "UID")?;
+            if let Some(what) = implausible(&words) {
+                anyhow::bail!("UID read back as {what} with the core halted: the target did not return its ID");
+            }
+            Ok(words.iter().map(|w| format!("{w:08x}")).collect())
+        }
         Some(ChipFamily::Esp32C5) => {
             let sys0 = core
                 .read_word_32(ESP32C5_EFUSE_MAC_SYS0)
