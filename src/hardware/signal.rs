@@ -258,17 +258,31 @@ fn resolve_link_port(link: &SignalLink) -> Result<DetectedPort> {
     };
 
     let ports = serialport::available_ports().context("failed to enumerate serial ports")?;
-    port::select(&ports, &Filter::for_declared_serial(port_serial)).map_err(|e| {
+    port::select(&ports, &Filter::for_declared_serial(port_serial)).map_err(|_| {
         anyhow::Error::new(SignalMismatch {
             name: link.name.clone(),
             origin_role: link.origin_role.clone(),
             declared_port_serial: Some(port_serial.clone()),
-            reason: format!(
-                "its declared bridge (USB serial '{port_serial}') is not currently enumerable: \
-                 {e}"
-            ),
+            reason: not_enumerable(port_serial, &ports),
         })
     })
+}
+
+/// Why a direct route's port is missing, in this signal's own terms. `port::select`'s error speaks
+/// of dev-bench's link (its VID gate, `set-dev-bench-link`), which is wrong advice for a DUT's
+/// console; what helps is which ports are there, and that a USB CDC ACM port is gone while its
+/// device resets (decision 40).
+#[cfg(feature = "hardware")]
+fn not_enumerable(port_serial: &str, ports: &[serialport::SerialPortInfo]) -> String {
+    let seen: Vec<&str> = ports.iter().map(|p| p.port_name.as_str()).collect();
+    format!(
+        "its declared port (USB serial '{port_serial}') is not enumerable now ({} serial port(s) \
+         visible{}{}); a USB CDC ACM port is gone while its device resets and returns once it \
+         re-enumerates",
+        seen.len(),
+        if seen.is_empty() { "" } else { ": " },
+        seen.join(", ")
+    )
 }
 
 /// Confirms a declared signal is where it says it is, **before an operation
@@ -475,5 +489,20 @@ port_serial = "FT9ABCDE"
     #[derive(Debug, Serialize, Deserialize, PartialEq)]
     struct Store {
         signals: Vec<SignalLink>,
+    }
+}
+
+#[cfg(all(test, feature = "hardware"))]
+mod not_enumerable_tests {
+    #[test]
+    fn a_missing_direct_port_names_the_ports_seen_not_dev_bench_advice() {
+        let ports = vec![serialport::SerialPortInfo {
+            port_name: "COM5".to_string(),
+            port_type: serialport::SerialPortType::Unknown,
+        }];
+        let why = super::not_enumerable("ABC123", &ports);
+        assert!(why.contains("USB serial 'ABC123'") && why.contains("1 serial port(s) visible: COM5"));
+        assert!(why.contains("re-enumerates") && !why.contains("dev-bench"));
+        assert!(super::not_enumerable("ABC123", &[]).contains("(0 serial port(s) visible)"));
     }
 }
