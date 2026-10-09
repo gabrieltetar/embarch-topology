@@ -46,6 +46,13 @@ pub fn is_canonical_role(role: &str) -> bool {
     CANONICAL_ROLES.contains(&role)
 }
 
+/// The `role` of a **bench board**: enrolled, identity-checked like any
+/// other, and holding neither role (decision 41). A USB PD partner or an
+/// instrument's host board is flashed and validated by its probe serial,
+/// never addressed by a role, so it needs no third role to be reachable.
+/// Any number of bench boards may be enrolled; each is keyed by its probe.
+pub const NO_ROLE: &str = "";
+
 /// One enrolled probe↔board association. `hardware_id` is the target chip's
 /// own factory-burned unique ID — independent of which probe or cable
 /// answers, so it survives a probe getting physically moved to a different
@@ -279,10 +286,15 @@ pub fn upsert(board: EnrolledBoard) -> Result<Option<EnrolledBoard>> {
 fn upsert_at(path: &Path, board: EnrolledBoard) -> Result<Option<EnrolledBoard>> {
     let mut store = load_at(path)?;
 
+    // **A bench board displaces nothing but its own probe's row** (decision
+    // 41): it holds no role, so the uniqueness rule has nothing to keep
+    // unique, and applying it would make every bench board delete the
+    // others.
+    let holds_role = board.role != NO_ROLE;
     let displaced = store
         .boards
         .iter()
-        .find(|b| b.role == board.role && b.probe_serial != board.probe_serial)
+        .find(|b| holds_role && b.role == board.role && b.probe_serial != board.probe_serial)
         .cloned();
 
     // **A row with no probe is never treated as sharing one.** Matching on
@@ -293,7 +305,7 @@ fn upsert_at(path: &Path, board: EnrolledBoard) -> Result<Option<EnrolledBoard>>
     let same_probe = |b: &EnrolledBoard| {
         board.probe_serial.is_some() && b.probe_serial == board.probe_serial
     };
-    store.boards.retain(|b| !same_probe(b) && b.role != board.role);
+    store.boards.retain(|b| !same_probe(b) && !(holds_role && b.role == board.role));
     store.boards.push(board);
     save_at(path, &store)?;
     Ok(displaced)
@@ -377,12 +389,40 @@ pub fn remove_by_role(role: &str) -> Result<Option<EnrolledBoard>> {
 /// the same split [`upsert_at`] is under, and for the same reason.
 #[cfg(feature = "hardware")]
 fn remove_by_role_at(path: &Path, role: &str) -> Result<Option<EnrolledBoard>> {
+    // Bench boards share the empty role, so it names no one board:
+    // [`remove_by_probe`] retracts those.
+    if role == NO_ROLE {
+        return Ok(None);
+    }
     let mut store = load_at(path)?;
     let removed = store.boards.iter().find(|b| b.role == role).cloned();
     if removed.is_none() {
         return Ok(None);
     }
     store.boards.retain(|b| b.role != role);
+    save_at(path, &store)?;
+    Ok(removed)
+}
+
+/// Removes the board enrolled through `probe_serial`, whatever role it holds,
+/// returning it; `Ok(None)` when no row names that probe. The only way to
+/// retract a **bench board** (decision 41), which has no role to name it by.
+/// Opens no probe, for the reason [`remove_by_role`] gives.
+#[cfg(feature = "hardware")]
+pub fn remove_by_probe(probe_serial: &str) -> Result<Option<EnrolledBoard>> {
+    remove_by_probe_at(&paths::enrollment_path()?, probe_serial)
+}
+
+/// [`remove_by_probe`]'s body against an explicit path.
+#[cfg(feature = "hardware")]
+fn remove_by_probe_at(path: &Path, probe_serial: &str) -> Result<Option<EnrolledBoard>> {
+    let mut store = load_at(path)?;
+    let names = |b: &EnrolledBoard| b.probe_serial.as_deref() == Some(probe_serial);
+    let removed = store.boards.iter().find(|b| names(b)).cloned();
+    if removed.is_none() {
+        return Ok(None);
+    }
+    store.boards.retain(|b| !names(b));
     save_at(path, &store)?;
     Ok(removed)
 }
@@ -504,6 +544,72 @@ mod tests {
 
         let missing = load_at(&path).unwrap().boards.into_iter().find(|b| b.role == "no-such-role");
         assert_eq!(missing, None);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Decision 41: bench boards hold no role, so two of them coexist, and
+    /// neither displaces the roles beside them.
+    #[test]
+    fn bench_boards_coexist_and_displace_no_role() {
+        let dir = temp_path("bench-board-dir");
+        let path = dir.join("enrollment.toml");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut dev_bench = sample("001057729826");
+        dev_bench.role = "dev-bench".to_string();
+        let dut = sample("000852006107");
+        save_at(&path, &Store { boards: vec![dev_bench, dut], signals: Vec::new(), ..Store::default() }).unwrap();
+
+        let mut pd_partner = sample("066DFF574885524867182407");
+        pd_partner.role = NO_ROLE.to_string();
+        pd_partner.name = "pd-bench".to_string();
+        let mut second = sample("0670FF0000000000000000AA");
+        second.role = NO_ROLE.to_string();
+        second.name = "drp-bench".to_string();
+
+        assert_eq!(upsert_at(&path, pd_partner.clone()).unwrap(), None);
+        assert_eq!(upsert_at(&path, second.clone()).unwrap(), None);
+
+        let boards = load_at(&path).unwrap().boards;
+        assert_eq!(boards.len(), 4, "both roles and both bench boards stay: {boards:?}");
+        assert!(boards.contains(&pd_partner) && boards.contains(&second));
+
+        // Re-enrolling a bench board replaces its own row only.
+        pd_partner.name = "pd-bench-snk1m1".to_string();
+        assert_eq!(upsert_at(&path, pd_partner.clone()).unwrap(), None);
+        let boards = load_at(&path).unwrap().boards;
+        assert_eq!(boards.len(), 4);
+        assert!(boards.contains(&pd_partner));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A bench board is retracted by its probe; the empty role names no one
+    /// board, so retracting "by role" with it removes nothing.
+    #[test]
+    fn bench_board_is_removed_by_probe_not_by_the_empty_role() {
+        let dir = temp_path("bench-remove-dir");
+        let path = dir.join("enrollment.toml");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut pd_partner = sample("066DFF574885524867182407");
+        pd_partner.role = NO_ROLE.to_string();
+        let mut second = sample("0670FF0000000000000000AA");
+        second.role = NO_ROLE.to_string();
+        let dut = sample("000852006107");
+        save_at(
+            &path,
+            &Store { boards: vec![pd_partner.clone(), second.clone(), dut.clone()], signals: Vec::new(), ..Store::default() },
+        )
+        .unwrap();
+
+        assert_eq!(remove_by_role_at(&path, NO_ROLE).unwrap(), None);
+        assert_eq!(load_at(&path).unwrap().boards.len(), 3);
+
+        assert_eq!(remove_by_probe_at(&path, "066DFF574885524867182407").unwrap(), Some(pd_partner));
+        assert_eq!(load_at(&path).unwrap().boards, vec![second, dut]);
+        assert_eq!(remove_by_probe_at(&path, "066DFF574885524867182407").unwrap(), None);
 
         std::fs::remove_dir_all(&dir).ok();
     }

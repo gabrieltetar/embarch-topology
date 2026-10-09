@@ -315,8 +315,8 @@ fn validate_known_timed(known: EnrolledBoard) -> Result<(EnrolledBoard, u64)> {
                 &recorded_hardware_id,
                 None,
                 format!(
-                    "probe '{}' enrolled as role '{}' is not currently attached",
-                    serial, known.role
+                    "probe '{}' enrolled as {} is not currently attached",
+                    serial, enrolled_as(&known)
                 ),
             ))
         }
@@ -331,11 +331,11 @@ fn validate_known_timed(known: EnrolledBoard) -> Result<(EnrolledBoard, u64)> {
                 &recorded_hardware_id,
                 None,
                 format!(
-                    "probe '{}' enrolled as role '{}' is attached but could not be opened ({e}) \
+                    "probe '{}' enrolled as {} is attached but could not be opened ({e}) \
                      — another process may be holding it, the OS may be denying permission, or \
                      it may be a half-wedged debug probe; close other tools that might have it \
                      open, or unplug and replug it, then retry",
-                    serial, known.role
+                    serial, enrolled_as(&known)
                 ),
             ))
         }
@@ -346,7 +346,7 @@ fn validate_known_timed(known: EnrolledBoard) -> Result<(EnrolledBoard, u64)> {
             &serial,
             &recorded_hardware_id,
             None,
-            format!("can't validate role '{}': {e}", known.role),
+            format!("can't validate {}: {e}", enrolled_as(&known)),
         ));
     }
     let mut session = match super::attach::attach(probe, known.chip.as_str(), Permissions::default()) {
@@ -358,9 +358,9 @@ fn validate_known_timed(known: EnrolledBoard) -> Result<(EnrolledBoard, u64)> {
                 &recorded_hardware_id,
                 None,
                 format!(
-                    "probe '{}' enrolled as role '{}' opened but failed to attach to chip '{}' \
+                    "probe '{}' enrolled as {} opened but failed to attach to chip '{}' \
                      ({e})",
-                    serial, known.role, known.chip
+                    serial, enrolled_as(&known), known.chip
                 ),
             ))
         }
@@ -374,9 +374,9 @@ fn validate_known_timed(known: EnrolledBoard) -> Result<(EnrolledBoard, u64)> {
                 &recorded_hardware_id,
                 None,
                 format!(
-                    "probe '{}' enrolled as role '{}' attached to chip '{}' but failed to select \
+                    "probe '{}' enrolled as {} attached to chip '{}' but failed to select \
                      core 0 ({e})",
-                    serial, known.role, known.chip
+                    serial, enrolled_as(&known), known.chip
                 ),
             ))
         }
@@ -390,9 +390,9 @@ fn validate_known_timed(known: EnrolledBoard) -> Result<(EnrolledBoard, u64)> {
                 &recorded_hardware_id,
                 None,
                 format!(
-                    "probe '{}' enrolled as role '{}' attached to chip '{}' but failed to read \
+                    "probe '{}' enrolled as {} attached to chip '{}' but failed to read \
                      its hardware ID ({e})",
-                    serial, known.role, known.chip
+                    serial, enrolled_as(&known), known.chip
                 ),
             ))
         }
@@ -407,9 +407,9 @@ fn validate_known_timed(known: EnrolledBoard) -> Result<(EnrolledBoard, u64)> {
             &recorded_hardware_id,
             Some(live_hardware_id.clone()),
             format!(
-                "probe '{}' is enrolled as role '{}' (chip '{}') with hardware ID '{}', but the \
+                "probe '{}' is enrolled as {} (chip '{}') with hardware ID '{}', but the \
                  attached chip now reports '{live_hardware_id}' — re-enroll if this is deliberate",
-                serial, known.role, known.chip, recorded_hardware_id
+                serial, enrolled_as(&known), known.chip, recorded_hardware_id
             ),
         ));
     }
@@ -425,6 +425,16 @@ fn validate_known_timed(known: EnrolledBoard) -> Result<(EnrolledBoard, u64)> {
 /// attached probe a call means.
 pub fn validate_serial(serial: &str) -> Result<EnrolledBoard> {
     validate_serial_timed(serial).map(|v| v.board)
+}
+
+/// How a message names what a probe is enrolled as: its role, or for a
+/// bench board ([`enrollment::NO_ROLE`], decision 41) the board's name.
+fn enrolled_as(known: &EnrolledBoard) -> String {
+    if known.role == enrollment::NO_ROLE {
+        format!("bench board '{}'", known.name)
+    } else {
+        format!("role '{}'", known.role)
+    }
 }
 
 /// Same live check as [`validate_serial`], additionally reporting when it

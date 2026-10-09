@@ -30,7 +30,7 @@ mod validate;
 
 pub use alert::{Alert, UI_HOST, UI_PORT};
 pub use bootload::{AmbiguousUsbPort, BootloadPorts, UsbPortId};
-pub use enrollment::{is_canonical_role, EnrolledBoard, CANONICAL_ROLES, DUT_ROLE};
+pub use enrollment::{is_canonical_role, EnrolledBoard, CANONICAL_ROLES, DUT_ROLE, NO_ROLE};
 #[cfg(feature = "hardware")]
 pub use hardware_id::{compare_self_reported, SelfReportedIdentity};
 #[cfg(feature = "hardware")]
@@ -203,6 +203,15 @@ pub fn set_role_board(role: &str, name: &str, chip: &str) -> anyhow::Result<Enro
 #[cfg(feature = "hardware")]
 pub fn unenroll(role: &str) -> anyhow::Result<Option<EnrolledBoard>> {
     enrollment::remove_by_role(role)
+}
+
+/// Retracts the board enrolled through `probe_serial`, whatever role it
+/// holds; `Ok(None)` when no row names that probe. The write behind
+/// `embarch-core`'s `DELETE /probes/by-serial/{serial}`, and the only way to
+/// retract a bench board ([`enrollment::NO_ROLE`]).
+#[cfg(feature = "hardware")]
+pub fn unenroll_probe(probe_serial: &str) -> anyhow::Result<Option<EnrolledBoard>> {
+    enrollment::remove_by_probe(probe_serial)
 }
 
 /// The rule [`enroll`] applies to pick one attached debug probe out of an
