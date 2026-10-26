@@ -38,11 +38,11 @@ pub use hardware_id::{compare_self_reported, SelfReportedIdentity};
 #[cfg(feature = "hardware")]
 pub use paths::{alert_log_path, data_dir, enrollment_path};
 pub use port::{
-    DetectedPort, DevBenchPort, ExcludingRule as DevBenchNotFoundRule,
+    AmbiguousDeclaredSerial, DetectedPort, DevBenchPort, ExcludingRule as DevBenchNotFoundRule,
     NotFound as DevBenchNotFound, DECLARED_SERIAL, DEV_BENCH_ROLE, ENUMERATED,
 };
 pub use signal::{
-    Route, SignalDirection, SignalLink, SignalMismatch, SignalNotDeclared,
+    Route, SignalAmbiguous, SignalDirection, SignalLink, SignalMismatch, SignalNotDeclared,
 };
 #[cfg(feature = "hardware")]
 pub use validate::{

@@ -514,9 +514,27 @@ pub fn select(ports: &[SerialPortInfo], filter: &Filter) -> Result<DetectedPort>
             .then_with(|| a.port_name.cmp(&b.port_name))
     });
 
+    if candidates.len() > 1 && filter.no_vid_gate {
+        // A declared serial (`Filter::for_declared_serial`) names one device,
+        // and a match on several ports means that device exposes several
+        // interfaces. Nothing declared says which, and nothing here can: a
+        // signal has no interface to declare (decision 46). Refuse by name
+        // rather than guess, with an error of its own so a caller can tell it
+        // from an absent port.
+        return Err(anyhow::Error::new(AmbiguousDeclaredSerial {
+            serial: filter.serial.clone().unwrap_or_default(),
+            candidates,
+        }));
+    }
+
     if candidates.len() > 1 {
+        // Two ports that both report no USB serial are not one probe: an
+        // absent serial identifies nothing, so equality of two `None`s is no
+        // evidence (decision 46).
         let one_probe = candidates.iter().all(|c| {
-            c.vendor_id == candidates[0].vendor_id && c.serial_number == candidates[0].serial_number
+            c.serial_number.is_some()
+                && c.vendor_id == candidates[0].vendor_id
+                && c.serial_number == candidates[0].serial_number
         });
         let interfaces_known = candidates.iter().all(|c| c.interface.is_some());
 
@@ -571,6 +589,31 @@ pub fn select(ports: &[SerialPortInfo], filter: &Filter) -> Result<DetectedPort>
 
     Ok(candidates.remove(0))
 }
+
+/// A declared USB serial matched several ports (decision 46): one device
+/// exposing several serial interfaces. Returned by [`select`] only when the
+/// filter was built by [`Filter::for_declared_serial`]; never a guess, and
+/// distinct from [`NotFound`] because the port is present.
+#[derive(Debug)]
+pub struct AmbiguousDeclaredSerial {
+    pub serial: String,
+    /// Every matching port, ordered by interface then name.
+    pub candidates: Vec<DetectedPort>,
+}
+
+impl std::fmt::Display for AmbiguousDeclaredSerial {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "USB serial '{}' matches {} ports, and nothing declared says which:\n{}",
+            self.serial,
+            self.candidates.len(),
+            describe(&self.candidates)
+        )
+    }
+}
+
+impl std::error::Error for AmbiguousDeclaredSerial {}
 
 #[cfg(feature = "hardware")]
 fn describe(candidates: &[DetectedPort]) -> String {

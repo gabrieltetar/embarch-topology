@@ -154,6 +154,44 @@ impl std::fmt::Display for SignalMismatch {
 
 impl std::error::Error for SignalMismatch {}
 
+/// A direct signal's declared USB serial matches several ports — one device
+/// exposing several serial interfaces (decision 46). **Not** a
+/// [`SignalMismatch`]: the port is present, so a caller that waits for a
+/// missing port to re-enumerate (Core's exchange) must not wait on this, and
+/// it is never guessed past.
+#[derive(Debug)]
+pub struct SignalAmbiguous {
+    pub name: String,
+    pub origin_role: String,
+    pub declared_port_serial: String,
+    /// Every matching port, ordered by interface then name.
+    pub candidates: Vec<DetectedPort>,
+}
+
+impl std::fmt::Display for SignalAmbiguous {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let ports = self
+            .candidates
+            .iter()
+            .map(|c| format!("{} (interface {:?})", c.port_name, c.interface))
+            .collect::<Vec<_>>()
+            .join(", ");
+        write!(
+            f,
+            "signal-ambiguous: signal '{}' (from role '{}') — its declared USB serial '{}' matches \
+             {} ports: {ports}. A direct route cannot yet declare which interface carries it, so \
+             it is refused rather than guessed; connect a device that exposes one serial port for \
+             this signal, or route it via dev-bench",
+            self.name,
+            self.origin_role,
+            self.declared_port_serial,
+            self.candidates.len()
+        )
+    }
+}
+
+impl std::error::Error for SignalAmbiguous {}
+
 /// No signal is declared under this name — a normal, expected state (nothing
 /// has been wired yet), not a bug. Downcastable so a caller can answer `404`
 /// rather than `500`, same as
@@ -258,7 +296,15 @@ fn resolve_link_port(link: &SignalLink) -> Result<DetectedPort> {
     };
 
     let ports = serialport::available_ports().context("failed to enumerate serial ports")?;
-    port::select(&ports, &Filter::for_declared_serial(port_serial)).map_err(|_| {
+    port::select(&ports, &Filter::for_declared_serial(port_serial)).map_err(|e| {
+        if let Some(amb) = e.downcast_ref::<port::AmbiguousDeclaredSerial>() {
+            return anyhow::Error::new(SignalAmbiguous {
+                name: link.name.clone(),
+                origin_role: link.origin_role.clone(),
+                declared_port_serial: port_serial.clone(),
+                candidates: amb.candidates.clone(),
+            });
+        }
         anyhow::Error::new(SignalMismatch {
             name: link.name.clone(),
             origin_role: link.origin_role.clone(),
@@ -332,6 +378,67 @@ mod tests {
                 interface: None,
             }),
         }
+    }
+
+    fn usb_if(
+        port_name: &str,
+        serial: Option<&str>,
+        interface: Option<u8>,
+    ) -> SerialPortInfo {
+        let mut p = usb(port_name, port::SEGGER_VID, Some("J-Link"), serial);
+        if let SerialPortType::UsbPort(u) = &mut p.port_type {
+            u.interface = interface;
+        }
+        p
+    }
+
+    #[test]
+    fn a_declared_serial_on_a_two_interface_device_is_refused_by_name() {
+        let ports = vec![
+            usb_if("COM17", Some("FT9ABCDE"), Some(2)),
+            usb_if("COM15", Some("FT9ABCDE"), Some(0)),
+            usb_if("COM9", Some("OTHER"), Some(0)),
+        ];
+        let err = port::select(&ports, &Filter::for_declared_serial("FT9ABCDE")).unwrap_err();
+        let amb = err.downcast_ref::<port::AmbiguousDeclaredSerial>().expect("ambiguous");
+        let names: Vec<&str> = amb.candidates.iter().map(|c| c.port_name.as_str()).collect();
+        assert_eq!(names, ["COM15", "COM17"]);
+        assert!(amb.candidates.iter().all(|c| c.guessed_among.is_none()));
+        assert!(err.downcast_ref::<port::NotFound>().is_none());
+        let text = err.to_string();
+        assert!(text.contains("COM15") && text.contains("COM17"), "{text}");
+        assert!(!text.contains("set-dev-bench-link"), "{text}");
+    }
+
+    #[test]
+    fn the_signal_ambiguity_is_not_a_mismatch_and_names_no_dev_bench_advice() {
+        let amb = SignalAmbiguous {
+            name: "console".into(),
+            origin_role: "dut".into(),
+            declared_port_serial: "FT9ABCDE".into(),
+            candidates: vec![],
+        };
+        let e = anyhow::Error::new(amb);
+        assert!(e.downcast_ref::<SignalMismatch>().is_none());
+        assert!(!e.to_string().contains("set-dev-bench-link"));
+    }
+
+    #[test]
+    fn two_serial_less_ports_are_not_one_probe() {
+        // Dev-bench path: an absent serial identifies nothing (decision 46).
+        let ports = vec![
+            usb_if("COM15", None, Some(0)),
+            usb_if("COM17", None, Some(2)),
+        ];
+        let filter = Filter {
+            serial: None,
+            product_needle: None,
+            product_needle_is_default: false,
+            serial_is_fallback: true,
+            interface: None,
+            no_vid_gate: false,
+        };
+        assert!(port::select(&ports, &filter).is_err());
     }
 
     fn outpost_link() -> SignalLink {
