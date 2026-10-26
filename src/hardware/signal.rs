@@ -108,7 +108,18 @@ pub enum Route {
     /// route adds a **third** VID-matching serial device to a bench that
     /// already had two, and the resolution failure without a declared serial
     /// is decision 17's ambiguity with one candidate louder.
-    Direct { port_serial: String },
+    ///
+    /// `interface` is the USB interface number carrying the signal, for a
+    /// device that exposes several serial interfaces under one serial (two
+    /// VCOMs, a dual-UART bridge): without it such a device is refused as
+    /// [`SignalAmbiguous`] rather than guessed (decision 46). Absent in every
+    /// row declared before it existed and omitted when absent, so no
+    /// enrollment file needs migrating and none grows a key nobody declared.
+    Direct {
+        port_serial: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        interface: Option<u8>,
+    },
     /// Terminates on declared dev-bench pins; dev-bench relays it over its
     /// existing Core link, **passing bytes through and interpreting
     /// nothing** (`embarch-outpost` decision 11).
@@ -182,9 +193,10 @@ impl std::fmt::Display for SignalAmbiguous {
         write!(
             f,
             "signal-ambiguous: signal '{}' (from role '{}') — its declared USB serial '{}' matches \
-             {} ports: {ports}. A direct route cannot yet declare which interface carries it, so \
-             it is refused rather than guessed; connect a device that exposes one serial port for \
-             this signal, or route it via dev-bench",
+             {} ports: {ports}. Nothing declared says which interface carries it, so it is \
+             refused rather than guessed; re-declare the signal with the interface that carries it \
+             (embarch-api declare_signal's `interface`, or pick that port in embarch-ui's \
+             Topology tab)",
             self.name,
             self.origin_role,
             self.declared_port_serial,
@@ -284,8 +296,8 @@ pub fn resolve_port(name: &str) -> Result<DetectedPort> {
 
 #[cfg(feature = "hardware")]
 fn resolve_link_port(link: &SignalLink) -> Result<DetectedPort> {
-    let port_serial = match &link.route {
-        Route::Direct { port_serial } => port_serial,
+    let (port_serial, interface) = match &link.route {
+        Route::Direct { port_serial, interface } => (port_serial, *interface),
         Route::ViaDevBench { .. } => {
             return Err(anyhow::Error::new(SignalMismatch {
                 name: link.name.clone(),
@@ -300,7 +312,7 @@ fn resolve_link_port(link: &SignalLink) -> Result<DetectedPort> {
     };
 
     let ports = serialport::available_ports().context("failed to enumerate serial ports")?;
-    port::select(&ports, &Filter::for_declared_serial(port_serial)).map_err(|e| {
+    port::select(&ports, &Filter::for_declared_serial(port_serial, interface)).map_err(|e| {
         if let Some(amb) = e.downcast_ref::<port::AmbiguousDeclaredSerial>() {
             return anyhow::Error::new(SignalAmbiguous {
                 name: link.name.clone(),
@@ -313,7 +325,7 @@ fn resolve_link_port(link: &SignalLink) -> Result<DetectedPort> {
             name: link.name.clone(),
             origin_role: link.origin_role.clone(),
             declared_port_serial: Some(port_serial.clone()),
-            reason: not_enumerable(port_serial, &ports),
+            reason: not_enumerable(port_serial, interface, &ports),
         })
     })
 }
@@ -321,12 +333,14 @@ fn resolve_link_port(link: &SignalLink) -> Result<DetectedPort> {
 /// Why a direct route's port is missing, in this signal's own terms. `port::select`'s error speaks
 /// of dev-bench's link (its VID gate, `set-dev-bench-link`), which is wrong advice for a DUT's
 /// console; what helps is which ports are there, and that a USB CDC ACM port is gone while its
-/// device resets (decision 40).
+/// device resets (decision 40). A declared interface is named with the serial, since a device can
+/// be present on another interface and still not carry this signal.
 #[cfg(feature = "hardware")]
-fn not_enumerable(port_serial: &str, ports: &[serialport::SerialPortInfo]) -> String {
+fn not_enumerable(port_serial: &str, interface: Option<u8>, ports: &[serialport::SerialPortInfo]) -> String {
     let seen: Vec<&str> = ports.iter().map(|p| p.port_name.as_str()).collect();
+    let on = interface.map(|i| format!(", interface {i}")).unwrap_or_default();
     format!(
-        "its declared port (USB serial '{port_serial}') is not enumerable now ({} serial port(s) \
+        "its declared port (USB serial '{port_serial}'{on}) is not enumerable now ({} serial port(s) \
          visible{}{}); a USB CDC ACM port is gone while its device resets and returns once it \
          re-enumerates",
         seen.len(),
@@ -403,7 +417,7 @@ mod tests {
             usb_if("COM15", Some("FT9ABCDE"), Some(0)),
             usb_if("COM9", Some("OTHER"), Some(0)),
         ];
-        let err = port::select(&ports, &Filter::for_declared_serial("FT9ABCDE")).unwrap_err();
+        let err = port::select(&ports, &Filter::for_declared_serial("FT9ABCDE", None)).unwrap_err();
         let amb = err.downcast_ref::<port::AmbiguousDeclaredSerial>().expect("ambiguous");
         let names: Vec<&str> = amb.candidates.iter().map(|c| c.port_name.as_str()).collect();
         assert_eq!(names, ["COM15", "COM17"]);
@@ -412,6 +426,35 @@ mod tests {
         let text = err.to_string();
         assert!(text.contains("COM15") && text.contains("COM17"), "{text}");
         assert!(!text.contains("set-dev-bench-link"), "{text}");
+    }
+
+    #[test]
+    fn a_declared_interface_resolves_a_two_interface_device_to_that_interface() {
+        // suite/052: the same two-interface device as above, now declared
+        // with the interface that carries the signal, resolves to exactly it.
+        let ports = vec![
+            usb_if("COM17", Some("FT9ABCDE"), Some(2)),
+            usb_if("COM15", Some("FT9ABCDE"), Some(0)),
+            usb_if("COM9", Some("OTHER"), Some(0)),
+        ];
+        let found = port::select(&ports, &Filter::for_declared_serial("FT9ABCDE", Some(2))).unwrap();
+        assert_eq!(found.port_name, "COM17");
+        assert_eq!(found.interface, Some(2));
+        assert_eq!(found.detected_by, port::DECLARED_SERIAL);
+        let found = port::select(&ports, &Filter::for_declared_serial("FT9ABCDE", Some(0))).unwrap();
+        assert_eq!(found.port_name, "COM15");
+        // An interface the device does not expose is a missing port, not an
+        // ambiguity, and not a guess at one of the others.
+        let err = port::select(&ports, &Filter::for_declared_serial("FT9ABCDE", Some(5))).unwrap_err();
+        assert!(err.downcast_ref::<port::AmbiguousDeclaredSerial>().is_none());
+    }
+
+    #[test]
+    fn a_missing_declared_interface_is_named_in_the_mismatch_reason() {
+        let ports = vec![usb_if("COM15", Some("FT9ABCDE"), Some(0))];
+        let why = not_enumerable("FT9ABCDE", Some(2), &ports);
+        assert!(why.contains("USB serial 'FT9ABCDE', interface 2"), "{why}");
+        assert!(!not_enumerable("FT9ABCDE", None, &ports).contains("interface"));
     }
 
     #[test]
@@ -450,7 +493,7 @@ mod tests {
             name: "outpost".to_string(),
             origin_role: "dut".to_string(),
             direction: SignalDirection::DutToHost,
-            route: Route::Direct { port_serial: "FT9ABCDE".to_string() },
+            route: Route::Direct { port_serial: "FT9ABCDE".to_string(), interface: None },
             baud: None,
         }
     }
@@ -475,6 +518,35 @@ mod tests {
             ..console
         };
         assert!(!relayed.host_can_write());
+    }
+
+    #[test]
+    fn a_row_declared_before_interface_existed_loads_and_round_trips_without_it() {
+        // suite/052: every direct row on disk predates `interface`; it must
+        // load as "none declared" and write back without the key, and a
+        // declared one must survive the round trip.
+        let old = r#"
+[[signals]]
+name = "console"
+origin_role = "dut"
+direction = "bidirectional"
+
+[signals.route]
+kind = "direct"
+port_serial = "FT9ABCDE"
+"#;
+        let store: Store = toml::from_str(old).unwrap();
+        assert_eq!(
+            store.signals[0].route,
+            Route::Direct { port_serial: "FT9ABCDE".to_string(), interface: None }
+        );
+        assert!(!toml::to_string_pretty(&store).unwrap().contains("interface"));
+        let declared = Route::Direct { port_serial: "FT9ABCDE".to_string(), interface: Some(2) };
+        let with = Store { signals: vec![SignalLink { route: declared.clone(), ..outpost_link() }] };
+        let text = toml::to_string_pretty(&with).unwrap();
+        assert!(text.contains("interface = 2"), "{text}");
+        let back: Store = toml::from_str(&text).unwrap();
+        assert_eq!(back.signals[0].route, declared);
     }
 
     #[test]
@@ -511,7 +583,7 @@ port_serial = "FT9ABCDE"
             usb("COM5", port::SEGGER_VID, Some("JLink CDC UART Port"), Some("000852006107")),
             usb("COM21", 0x0403, Some("FT232R USB UART"), Some("FT9ABCDE")),
         ];
-        let found = port::select(&ports, &Filter::for_declared_serial("FT9ABCDE")).unwrap();
+        let found = port::select(&ports, &Filter::for_declared_serial("FT9ABCDE", None)).unwrap();
         assert_eq!(found.port_name, "COM21");
         // No VID rule ran here — the gate was off — so the provenance must
         // say so rather than crediting `detected_by_for_vid`'s fallback
@@ -528,7 +600,7 @@ port_serial = "FT9ABCDE"
             usb("COM5", port::SEGGER_VID, Some("JLink CDC UART Port"), Some("000852006107")),
             usb("COM21", port::SILABS_VID, Some("CP210x"), Some("BRIDGE-2")),
         ];
-        let found = port::select(&ports, &Filter::for_declared_serial("BRIDGE-2")).unwrap();
+        let found = port::select(&ports, &Filter::for_declared_serial("BRIDGE-2", None)).unwrap();
         assert_eq!(found.port_name, "COM21");
         // Also true when the declared-serial candidate happens to carry a
         // recognized VID: the gate was still off, so the VID played no
@@ -536,7 +608,7 @@ port_serial = "FT9ABCDE"
         assert_eq!(found.detected_by, port::DECLARED_SERIAL);
         // And an undeclared serial resolves to nothing rather than to
         // whichever candidate happened to sort first.
-        assert!(port::select(&ports, &Filter::for_declared_serial("NOT-HERE")).is_err());
+        assert!(port::select(&ports, &Filter::for_declared_serial("NOT-HERE", None)).is_err());
     }
 
     #[test]
@@ -611,9 +683,9 @@ mod not_enumerable_tests {
             port_name: "COM5".to_string(),
             port_type: serialport::SerialPortType::Unknown,
         }];
-        let why = super::not_enumerable("ABC123", &ports);
+        let why = super::not_enumerable("ABC123", None, &ports);
         assert!(why.contains("USB serial 'ABC123'") && why.contains("1 serial port(s) visible: COM5"));
         assert!(why.contains("re-enumerates") && !why.contains("dev-bench"));
-        assert!(super::not_enumerable("ABC123", &[]).contains("(0 serial port(s) visible)"));
+        assert!(super::not_enumerable("ABC123", None, &[]).contains("(0 serial port(s) visible)"));
     }
 }

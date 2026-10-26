@@ -387,14 +387,17 @@ impl Filter {
     /// product-string gate — [`super::signal`]'s `Route::Direct` resolution
     /// (decision 18). A declared serial is a fact a human read
     /// off the actual device, so it narrows hard, the same way
-    /// `EnrolledBoard::link_port_serial` does (decision 17).
-    pub fn for_declared_serial(serial: &str) -> Self {
+    /// `EnrolledBoard::link_port_serial` does (decision 17). A declared
+    /// `interface` narrows further, to one of the several serial interfaces a
+    /// device can expose under that serial; without one, several matches are
+    /// refused rather than guessed between (decision 46).
+    pub fn for_declared_serial(serial: &str, interface: Option<u8>) -> Self {
         Self {
             serial: Some(serial.to_string()),
             product_needle: None,
             product_needle_is_default: false,
             serial_is_fallback: false,
-            interface: None,
+            interface,
             no_vid_gate: true,
         }
     }
@@ -517,8 +520,8 @@ pub fn select(ports: &[SerialPortInfo], filter: &Filter) -> Result<DetectedPort>
     if candidates.len() > 1 && filter.no_vid_gate {
         // A declared serial (`Filter::for_declared_serial`) names one device,
         // and a match on several ports means that device exposes several
-        // interfaces. Nothing declared says which, and nothing here can: a
-        // signal has no interface to declare (decision 46). Refuse by name
+        // interfaces. Nothing declared says which — the route declared no
+        // `interface`, which would have narrowed above (decision 46). Refuse by name
         // rather than guess, with an error of its own so a caller can tell it
         // from an absent port.
         return Err(anyhow::Error::new(AmbiguousDeclaredSerial {
