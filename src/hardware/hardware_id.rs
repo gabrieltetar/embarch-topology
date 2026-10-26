@@ -116,19 +116,31 @@ fn classify_chip(chip: &str) -> Option<ChipFamily> {
 /// Reads `chip`'s factory-unique hardware ID over an already-attached
 /// `core`, formatted as a lowercase hex string.
 pub fn read(core: &mut Core<'_>, chip: &str) -> Result<String> {
+    read_counted(core, chip).map(|(id, _)| id)
+}
+
+/// [`read`], plus how many times the read halted the core (topology/067): 0 when the family
+/// reads without halting or the core was already halted, 1 per halt this read itself made.
+pub fn read_counted(core: &mut Core<'_>, chip: &str) -> Result<(String, u32)> {
+    let mut halts = 0;
+    let id = read_inner(core, chip, &mut halts)?;
+    Ok((id, halts))
+}
+
+fn read_inner(core: &mut Core<'_>, chip: &str, halts: &mut u32) -> Result<String> {
     match classify_chip(chip) {
         Some(ChipFamily::Nrf54InfoDeviceId) => {
-            read_words(core, &NRF54L_FICR_INFO_DEVICEID, "FICR.INFO.DEVICEID")
+            read_words(core, &NRF54L_FICR_INFO_DEVICEID, "FICR.INFO.DEVICEID", halts)
         }
         Some(ChipFamily::NrfClassicDeviceId) => {
-            read_words(core, &NRF5X_FICR_DEVICEID, "FICR.DEVICEID")
+            read_words(core, &NRF5X_FICR_DEVICEID, "FICR.DEVICEID", halts)
         }
         // Always halted (decision 39): a running G0 that idles in WFI with no DMA clock on answers
         // debug reads with 0 or a stale word, and not always all three alike — on 2026-10-06 a
         // running read came back `0000c000 4d4d5003 00008000`, one word right, which no
         // plausibility check can tell from a different board.
         Some(ChipFamily::Stm32G0Uid) => {
-            let words = read_halted(core, &STM32G0_UID, "UID")?;
+            let words = read_halted(core, &STM32G0_UID, "UID", halts)?;
             if let Some(what) = implausible(&words) {
                 anyhow::bail!("UID read back as {what} with the core halted: the target did not return its ID");
             }
@@ -339,14 +351,14 @@ fn esp32c5_expected_self_report(jtag_read: &str) -> Option<String> {
 /// any repeated word: an STM32G0 DUT asleep with its system bus unclocked
 /// (DHCSR `S_SLEEP`) read `00000e80` three times through probe-rs and J-Link
 /// alike, and enrolment recorded that as its ID.
-fn read_words(core: &mut Core<'_>, addresses: &[u64], name: &str) -> Result<String> {
+fn read_words(core: &mut Core<'_>, addresses: &[u64], name: &str, halts: &mut u32) -> Result<String> {
     let mut words = read_once(core, addresses, name)?;
     if implausible(&words).is_some() {
         std::thread::sleep(std::time::Duration::from_millis(50));
         words = read_once(core, addresses, name)?;
     }
     if implausible(&words).is_some() {
-        words = read_halted(core, addresses, name)?;
+        words = read_halted(core, addresses, name, halts)?;
     }
     if let Some(what) = implausible(&words) {
         anyhow::bail!(
@@ -362,11 +374,18 @@ fn read_words(core: &mut Core<'_>, addresses: &[u64], name: &str) -> Result<Stri
 /// debug read of the system bus is always good on a halted core, and an STM32G0 idling in WFI
 /// with no DMA clock on answers every running read with 0 or a stale word. The halt lasts the
 /// three reads.
-fn read_halted(core: &mut Core<'_>, addresses: &[u64], name: &str) -> Result<Vec<u32>> {
+fn read_halted<C: IdCore>(
+    core: &mut C,
+    addresses: &[u64],
+    name: &str,
+    halts: &mut u32,
+) -> Result<Vec<u32>> {
     let was_halted = core.core_halted().context("failed to read whether the core is halted")?;
     if !was_halted {
         core.halt(std::time::Duration::from_millis(100))
             .context("failed to halt the core for an ID read")?;
+        // Counted once the halt took, whatever the read does next (topology/067).
+        *halts += 1;
     }
     let words = read_once(core, addresses, name);
     if !was_halted {
@@ -375,12 +394,36 @@ fn read_halted(core: &mut Core<'_>, addresses: &[u64], name: &str) -> Result<Vec
     words
 }
 
-fn read_once(core: &mut Core<'_>, addresses: &[u64], name: &str) -> Result<Vec<u32>> {
+/// The four core operations an ID read uses, so `read_halted` is testable without a probe.
+trait IdCore {
+    fn core_halted(&mut self) -> Result<bool>;
+    fn halt(&mut self, timeout: std::time::Duration) -> Result<()>;
+    fn run(&mut self) -> Result<()>;
+    fn read_word(&mut self, address: u64) -> Result<u32>;
+}
+
+impl IdCore for Core<'_> {
+    fn core_halted(&mut self) -> Result<bool> {
+        Ok(Core::core_halted(self)?)
+    }
+    fn halt(&mut self, timeout: std::time::Duration) -> Result<()> {
+        Core::halt(self, timeout)?;
+        Ok(())
+    }
+    fn run(&mut self) -> Result<()> {
+        Ok(Core::run(self)?)
+    }
+    fn read_word(&mut self, address: u64) -> Result<u32> {
+        Ok(MemoryInterface::read_word_32(self, address)?)
+    }
+}
+
+fn read_once<C: IdCore>(core: &mut C, addresses: &[u64], name: &str) -> Result<Vec<u32>> {
     addresses
         .iter()
         .enumerate()
         .map(|(i, &address)| {
-            core.read_word_32(address)
+            core.read_word(address)
                 .with_context(|| format!("failed to read {name}[{i}] at {address:#x}"))
         })
         .collect()
@@ -403,6 +446,48 @@ fn implausible(words: &[u32]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stand-in core: counts what `read_halted` asks of it.
+    struct Fake {
+        halted: bool,
+        halts: u32,
+        runs: u32,
+    }
+    impl IdCore for Fake {
+        fn core_halted(&mut self) -> Result<bool> {
+            Ok(self.halted)
+        }
+        fn halt(&mut self, _: std::time::Duration) -> Result<()> {
+            self.halted = true;
+            self.halts += 1;
+            Ok(())
+        }
+        fn run(&mut self) -> Result<()> {
+            self.halted = false;
+            self.runs += 1;
+            Ok(())
+        }
+        fn read_word(&mut self, address: u64) -> Result<u32> {
+            Ok(address as u32)
+        }
+    }
+
+    #[test]
+    fn a_running_core_is_halted_once_and_let_run_again() {
+        let mut core = Fake { halted: false, halts: 0, runs: 0 };
+        let mut halts = 0;
+        let words = read_halted(&mut core, &[1, 2, 3], "UID", &mut halts).unwrap();
+        assert_eq!(words, vec![1, 2, 3]);
+        assert_eq!((halts, core.halts, core.runs, core.halted), (1, 1, 1, false));
+    }
+
+    #[test]
+    fn an_already_halted_core_is_not_counted_and_stays_halted() {
+        let mut core = Fake { halted: true, halts: 0, runs: 0 };
+        let mut halts = 0;
+        read_halted(&mut core, &[1, 2, 3], "UID", &mut halts).unwrap();
+        assert_eq!((halts, core.halts, core.runs, core.halted), (0, 0, 0, true));
+    }
 
     #[test]
     fn an_id_with_every_word_the_same_is_a_failed_read_not_an_id() {

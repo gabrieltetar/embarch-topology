@@ -276,9 +276,13 @@ pub struct Validation {
     /// hardware-ID compare passed — i.e. *now*, not when the record was
     /// made.
     pub validated_at_utc_ms: u64,
+    /// How many times the identity gate halted the core to read the ID (topology/067): 0 when
+    /// the core was already halted or the family reads without halting. Added after the
+    /// type shipped; `Validation` only serializes, so no payload has to load without it.
+    pub halts: u32,
 }
 
-fn validate_known_timed(known: EnrolledBoard) -> Result<(EnrolledBoard, u64)> {
+fn validate_known_timed(known: EnrolledBoard) -> Result<(EnrolledBoard, u64, u32)> {
     // The probe half, or the reason there is nothing to validate. Both
     // fields are written together by `enroll`, so a row carrying one
     // without the other is hand-edited — named as such rather than
@@ -381,8 +385,8 @@ fn validate_known_timed(known: EnrolledBoard) -> Result<(EnrolledBoard, u64)> {
             ))
         }
     };
-    let live_hardware_id = match hardware_id::read(&mut core, &known.chip) {
-        Ok(id) => id,
+    let (live_hardware_id, halts) = match hardware_id::read_counted(&mut core, &known.chip) {
+        Ok(read) => read,
         Err(e) => {
             return Err(raise(
                 &known,
@@ -417,7 +421,7 @@ fn validate_known_timed(known: EnrolledBoard) -> Result<(EnrolledBoard, u64)> {
     // Read *after* the compare above passes — this names the instant the
     // live check succeeded, not when the attach/read attempt merely began.
     let validated_at_utc_ms = enrollment::now_utc_ms();
-    Ok((known, validated_at_utc_ms))
+    Ok((known, validated_at_utc_ms, halts))
 }
 
 /// Validate by the probe's own USB serial number — `embarch-core`'s
@@ -446,8 +450,8 @@ pub fn validate_serial_timed(serial: &str) -> Result<Validation> {
              with only this board's probe attached"
         )
     })?;
-    let (board, validated_at_utc_ms) = validate_known_timed(known)?;
-    Ok(Validation { board, validated_at_utc_ms })
+    let (board, validated_at_utc_ms, halts) = validate_known_timed(known)?;
+    Ok(Validation { board, validated_at_utc_ms, halts })
 }
 
 /// The caller asked for one chip and the probe is enrolled against another
@@ -520,8 +524,8 @@ pub fn validate_serial_for_chip(serial: &str, requested_chip: &str) -> Result<Va
         )
     })?;
     check_requested_chip(&known, requested_chip).map_err(anyhow::Error::new)?;
-    let (board, validated_at_utc_ms) = validate_known_timed(known)?;
-    Ok(Validation { board, validated_at_utc_ms })
+    let (board, validated_at_utc_ms, halts) = validate_known_timed(known)?;
+    Ok(Validation { board, validated_at_utc_ms, halts })
 }
 
 /// Validate by enrollment `role` rather than by serial — for a link that
@@ -537,8 +541,8 @@ pub fn validate_role(role: &str) -> Result<EnrolledBoard> {
 pub fn validate_role_timed(role: &str) -> Result<Validation> {
     let known = enrollment::find_by_role(role)?
         .ok_or_else(|| anyhow::Error::new(NotEnrolled { role: role.to_string() }))?;
-    let (board, validated_at_utc_ms) = validate_known_timed(known)?;
-    Ok(Validation { board, validated_at_utc_ms })
+    let (board, validated_at_utc_ms, halts) = validate_known_timed(known)?;
+    Ok(Validation { board, validated_at_utc_ms, halts })
 }
 
 /// The rule both [`enroll`] below and `embarch-core::resolve_probe`
@@ -772,7 +776,7 @@ mod tests {
     /// separating them.
     #[test]
     fn validation_keeps_the_two_timestamps_distinct_in_json() {
-        let v = Validation { board: board(), validated_at_utc_ms: 1_788_723_019_911 };
+        let v = Validation { board: board(), validated_at_utc_ms: 1_788_723_019_911, halts: 1 };
         let json = serde_json::to_value(&v).expect("Validation must serialize");
         let board_confirmed_at = json["board"]["confirmed_at_utc_ms"]
             .as_u64()
@@ -782,6 +786,7 @@ mod tests {
         assert_eq!(board_confirmed_at, 1_788_195_194_573);
         assert_eq!(validated_at, 1_788_723_019_911);
         assert_ne!(board_confirmed_at, validated_at, "a real regression this guards against");
+        assert_eq!(json["halts"].as_u64(), Some(1));
     }
 
     // `select_probe` needs a `&'static dyn ProbeFactory` to build a fake
