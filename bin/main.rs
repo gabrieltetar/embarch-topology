@@ -17,6 +17,12 @@ use embarch_topology::software::{self, DEFAULT_CORE_PORT};
 #[command(name = "embarch-topology", version)]
 #[command(about = "EmbArch's software/hardware topology — inspect, enroll, validate")]
 struct Cli {
+    /// The port a live embarch-core may be listening on, for the guard every
+    /// mutating subcommand runs first (decision 28). Core's own `run --port`
+    /// can move it off the default; name that port here or the guard looks
+    /// in the wrong place and a second writer runs beside Core.
+    #[arg(long, global = true, default_value_t = DEFAULT_CORE_PORT)]
+    core_port: u16,
     #[command(subcommand)]
     command: Command,
 }
@@ -28,8 +34,9 @@ enum Command {
     Status {
         #[arg(long, default_value_t = DEFAULT_CORE_PORT)]
         port: u16,
-        /// A declared remote host, if any (skips auto-detection's WSL2/
-        /// loopback candidates and probes only this one).
+        /// A declared remote host, if any. It is probed **last**, after
+        /// loopback and (under WSL2) the gateway — those two are still tried
+        /// first, so a Core on this machine wins over the named host.
         #[arg(long)]
         host: Option<String>,
     },
@@ -46,9 +53,10 @@ enum Command {
     /// decision 44). What a board is *called* is `--name`, a separate fact:
     /// before it existed the only place to put a board's name was its role,
     /// which is how a bench ended up with a board enrolled as
-    /// `client-nucleo`.
+    /// `client-nucleo`. Omit `--role` to enrol a **bench board** (decision
+    /// 41): it holds no role and `--name` is then required, as on Core.
     Enroll {
-        #[arg(long)]
+        #[arg(long, default_value = "")]
         role: String,
         #[arg(long)]
         chip: String,
@@ -60,11 +68,15 @@ enum Command {
         #[arg(long, default_value = "")]
         name: String,
     },
-    /// Retract whatever board holds `role`, leaving that role empty. Opens
-    /// no probe: an unplugged board unenrols exactly like an attached one.
+    /// Retract whatever board holds `--role`, leaving that role empty, or
+    /// (a bench board holds no role) the board enrolled through
+    /// `--probe-serial`. Exactly one of the two. Opens no probe: an
+    /// unplugged board unenrols exactly like an attached one.
     Unenroll {
+        #[arg(long, conflicts_with = "probe_serial", required_unless_present = "probe_serial")]
+        role: Option<String>,
         #[arg(long)]
-        role: String,
+        probe_serial: Option<String>,
     },
     /// Declare which **board type** is in `role` — the shape a repo builds
     /// for (`nrf54l15dk`), not a piece of hardware. Opens no probe: this
@@ -178,10 +190,34 @@ fn check_canonical_role(role: &str) -> anyhow::Result<()> {
     if hardware::is_canonical_role(role) {
         return Ok(());
     }
+    if role == hardware::NO_ROLE {
+        anyhow::bail!(
+            "--role is required here: the roles are {}",
+            hardware::CANONICAL_ROLES.join(" and ")
+        );
+    }
     anyhow::bail!(
         "'{role}' is not a role — the roles are {}. What a board is called goes in --name",
         hardware::CANONICAL_ROLES.join(" and ")
     )
+}
+
+/// The role rule `enroll` applies — the one `embarch-core`'s `POST
+/// /probes/enroll` applies (decision 35, amended by 61): a canonical role, or
+/// the empty role for a bench board (decision 41), which must then carry a
+/// name because nothing else tells it from the other bench boards.
+fn check_enroll_role(role: &str, name: &str) -> anyhow::Result<()> {
+    if role == hardware::NO_ROLE {
+        if name.trim().is_empty() {
+            anyhow::bail!(
+                "a board enrolled with no role is a bench board, and needs a --name to be told \
+                 apart — or give it a role: {}",
+                hardware::CANONICAL_ROLES.join(" or ")
+            );
+        }
+        return Ok(());
+    }
+    check_canonical_role(role)
 }
 
 /// Refuses a mutation when a live `embarch-core` answers on this machine —
@@ -204,15 +240,17 @@ fn check_canonical_role(role: &str) -> anyhow::Result<()> {
 /// client (dispatch note, `tasks/topology/011`).
 fn refuse_if_core_reachable(
     rt: &tokio::runtime::Runtime,
+    core_port: u16,
     endpoint: &str,
 ) -> anyhow::Result<()> {
-    let resolved = rt.block_on(software::resolve_software_topology(DEFAULT_CORE_PORT, None, None));
+    let resolved = rt.block_on(software::resolve_software_topology(core_port, None, None));
     if let Some(w) = resolved.winner {
         anyhow::bail!(
-            "refusing: embarch-core is reachable at {} ({}) and holds the hardware lock and \
+            "refusing: embarch-core is reachable at {} ({}; probed port {core_port}, \
+             set --core-port if Core listens elsewhere) and holds the hardware lock and \
              the store this mutation writes (embarch-topology decision 28) — run it there \
              instead, against:\n  {}{endpoint}\nThis command still runs locally when no Core \
-             answers at all (local-bootstrap).",
+             answers at all on port {core_port} (local-bootstrap).",
             w.base_url,
             w.class.as_str(),
             w.base_url,
@@ -224,6 +262,7 @@ fn refuse_if_core_reachable(
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     let cli = Cli::parse();
+    let core_port = cli.core_port;
 
     match cli.command {
         Command::Status { port, host } => {
@@ -263,8 +302,8 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Enroll { role, chip, probe_serial, name } => {
             let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-            refuse_if_core_reachable(&rt, "/probes/enroll")?;
-            check_canonical_role(&role)?;
+            refuse_if_core_reachable(&rt, core_port, "/probes/enroll")?;
+            check_enroll_role(&role, &name)?;
             let board = hardware::enroll(&role, &chip, probe_serial.as_deref(), &name)?;
             println!(
                 "enrolled '{}' as role '{}': probe {}, hardware_id {}",
@@ -274,12 +313,19 @@ fn main() -> anyhow::Result<()> {
                 board.hardware_id.as_deref().unwrap_or("(unread)")
             );
         }
-        Command::Unenroll { role } => {
+        Command::Unenroll { role, probe_serial } => {
             let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-            refuse_if_core_reachable(&rt, "/probes/enrolled")?;
+            refuse_if_core_reachable(&rt, core_port, "/probes/enrolled")?;
             // A role outside the canonical pair is exactly what this
             // command exists to clear, so it is *not* checked here.
-            match hardware::unenroll(&role)? {
+            let (removed, what) = match (role, probe_serial) {
+                (_, Some(serial)) => {
+                    (hardware::unenroll_probe(&serial)?, format!("probe '{serial}'"))
+                }
+                (Some(role), None) => (hardware::unenroll(&role)?, format!("role '{role}'")),
+                (None, None) => unreachable!("clap requires one of --role/--probe-serial"),
+            };
+            match removed {
                 Some(b) => println!(
                     "unenrolled role '{}': was probe {} chip {} hardware_id {}",
                     b.role,
@@ -288,14 +334,14 @@ fn main() -> anyhow::Result<()> {
                     b.hardware_id.as_deref().unwrap_or("(unread)")
                 ),
                 None => {
-                    eprintln!("no board enrolled under role '{role}'");
+                    eprintln!("no board enrolled under {what}");
                     std::process::exit(1);
                 }
             }
         }
         Command::SetBoard { role, board, chip } => {
             let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-            refuse_if_core_reachable(&rt, "/probes/enrolled/{role}/board")?;
+            refuse_if_core_reachable(&rt, core_port, "/probes/enrolled/{role}/board")?;
             check_canonical_role(&role)?;
             let row = hardware::set_role_board(&role, &board, &chip)?;
             println!(
@@ -308,7 +354,7 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Validate { role } => {
             let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-            refuse_if_core_reachable(&rt, "/validate")?;
+            refuse_if_core_reachable(&rt, core_port, "/validate")?;
             match hardware::validate_role_timed(&role) {
             Ok(v) => println!(
                 "ok: '{}' still matches hardware_id {} (enrolled_confirmed_at_utc_ms {}, \
@@ -341,7 +387,7 @@ fn main() -> anyhow::Result<()> {
                 );
             }
             let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-            refuse_if_core_reachable(&rt, "/dev-bench/link")?;
+            refuse_if_core_reachable(&rt, core_port, "/dev-bench/link")?;
             if let Some(serial) = &serial {
                 hardware::set_dev_bench_link_port_serial(serial)?;
                 println!("dev-bench link port serial set to '{serial}'");
@@ -387,6 +433,45 @@ mod tests {
             interface: Some(0),
             guessed_among: None,
         }
+    }
+
+    #[test]
+    fn enroll_role_matches_cores_rule() {
+        assert!(check_enroll_role("dut", "").is_ok());
+        assert!(check_enroll_role("dev-bench", "x").is_ok());
+        assert!(check_enroll_role("", "pd-partner").is_ok(), "a named bench board enrols");
+        let e = check_enroll_role("", "  ").unwrap_err().to_string();
+        assert!(e.contains("bench board") && e.contains("--name"), "{e}");
+        assert!(check_enroll_role("client-nucleo", "x").is_err());
+        assert!(check_enroll_role("DUT", "x").is_err());
+    }
+
+    #[test]
+    fn set_board_and_validate_still_refuse_the_empty_role() {
+        let e = check_canonical_role("").unwrap_err().to_string();
+        assert!(e.contains("--role is required"), "{e}");
+    }
+
+    /// A Core on a non-default port the operator names: the guard refuses and
+    /// says which port it probed. The same Core is invisible on the default.
+    #[test]
+    fn guard_probes_the_named_port() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert_ne!(port, DEFAULT_CORE_PORT);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { break };
+                let mut buf = [0u8; 1024];
+                let _ = s.read(&mut buf);
+                let _ = s.write_all(b"HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
+            }
+        });
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let e = refuse_if_core_reachable(&rt, port, "/probes/enroll").unwrap_err().to_string();
+        assert!(e.contains(&format!("127.0.0.1:{port}")), "{e}");
+        assert!(e.contains(&format!("probed port {port}")), "{e}");
     }
 
     #[test]
