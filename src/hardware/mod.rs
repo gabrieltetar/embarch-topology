@@ -30,7 +30,9 @@ mod validate;
 
 pub use alert::{Alert, UI_HOST, UI_PORT};
 pub use bootload::{AmbiguousUsbPort, BootloadPorts, UsbPortId};
-pub use enrollment::{is_canonical_role, EnrolledBoard, Upserted, CANONICAL_ROLES, DUT_ROLE, NO_ROLE};
+pub use enrollment::{is_canonical_role, EnrolledBoard, CANONICAL_ROLES, DUT_ROLE, NO_ROLE};
+#[cfg(feature = "hardware")]
+pub use enrollment::Upserted;
 #[cfg(feature = "hardware")]
 pub use hardware_id::{compare_self_reported, SelfReportedIdentity};
 #[cfg(feature = "hardware")]
@@ -181,6 +183,19 @@ pub fn enroll(
     name: &str,
 ) -> anyhow::Result<EnrolledBoard> {
     validate::enroll(role, chip, probe_serial, name)
+}
+
+/// [`enroll`], also returning what the write displaced or vacated
+/// ([`Upserted`], decision 42) so a caller can report it rather than only
+/// the log. Same arguments and same write as [`enroll`].
+#[cfg(feature = "hardware")]
+pub fn enroll_reporting(
+    role: &str,
+    chip: &str,
+    probe_serial: Option<&str>,
+    name: &str,
+) -> anyhow::Result<(EnrolledBoard, Upserted)> {
+    validate::enroll_reporting(role, chip, probe_serial, name)
 }
 
 /// Declares **which board type is in `role`** — a shape a repo builds for,

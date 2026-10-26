@@ -70,6 +70,11 @@ serde_json = { version = "1.0.150", optional = true }
 clap = { version = "4.6.2", features = ["derive"], optional = true }
 
 [features]
+# GATE ITEM: besides default features and `--all-features`, build, test and
+# clippy (`-D warnings`) `--no-default-features --features software,wire` —
+# the configuration embarch-api's `embarch-core-client`, embarch-ui and
+# embarch-umbrella use. Neither other combination catches an item that is
+# `hardware`-only but re-exported unconditionally (topology/065).
 # `software` on by default: the common case (embarch-api/embarch-umbrella)
 # needs it and neither wants `hardware`, so defaulting it on and having
 # embarch-core opt out (the one consumer that doesn't need it) is fewer
