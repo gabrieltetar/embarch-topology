@@ -45,7 +45,11 @@ pub use signal::{
     Route, SignalDirection, SignalLink, SignalMismatch, SignalNotDeclared,
 };
 #[cfg(feature = "hardware")]
-pub use validate::{AttachedProbe, NoProbeBound, NotEnrolled, TopologyMismatch, Validation};
+pub use validate::{
+    check_requested_chip, AttachedProbe, NoProbeBound, NotEnrolled, RequestedChipMismatch, TopologyMismatch,
+    Validation,
+};
+
 
 /// Recent alerts from the durable log — `embarch-topology`'s own UI/CLI
 /// listing, and what a `doctor`-style check reports as evidence rather than
@@ -284,6 +288,16 @@ pub fn check_target_powered(probe: &mut probe_rs::probe::Probe) -> anyhow::Resul
 #[cfg(feature = "hardware")]
 pub fn validate_serial(serial: &str) -> anyhow::Result<EnrolledBoard> {
     validate::validate_serial(serial)
+}
+
+/// [`validate_serial_timed`] preceded by a by-name comparison of the chip
+/// the caller is asking for with the one the probe is enrolled against: a
+/// differing chip is refused with a [`RequestedChipMismatch`] **before the
+/// probe is opened** (topology decision 44). Additive; the two functions
+/// above are unchanged.
+#[cfg(feature = "hardware")]
+pub fn validate_serial_for_chip(serial: &str, requested_chip: &str) -> anyhow::Result<Validation> {
+    validate::validate_serial_for_chip(serial, requested_chip)
 }
 
 /// Same live check as [`validate_serial`], additionally reporting when it

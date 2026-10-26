@@ -450,6 +450,80 @@ pub fn validate_serial_timed(serial: &str) -> Result<Validation> {
     Ok(Validation { board, validated_at_utc_ms })
 }
 
+/// The caller asked for one chip and the probe is enrolled against another
+/// (topology decision 44): the probe has moved to a board of a different
+/// family. Raised by [`check_requested_chip`] **before the probe is
+/// opened**, so it never reads as a failed identity read on the old chip's
+/// target description. Downcastable like [`TopologyMismatch`]; not an alert,
+/// because nothing was read and nothing disagreed about silicon.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RequestedChipMismatch {
+    pub probe_serial: String,
+    /// The enrolled row's board name, chip and role (empty for a bench board).
+    pub enrolled_name: String,
+    pub enrolled_chip: String,
+    pub enrolled_role: String,
+    pub requested_chip: String,
+}
+
+impl std::fmt::Display for RequestedChipMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let as_ = if self.enrolled_role == enrollment::NO_ROLE {
+            format!("bench board '{}'", self.enrolled_name)
+        } else {
+            format!("role '{}' (board '{}')", self.enrolled_role, self.enrolled_name)
+        };
+        write!(
+            f,
+            "chip-mismatch: probe '{}' is enrolled as {} with chip '{}', but this call is for chip \
+             '{}' — the probe has probably moved to another board. Nothing was attached. Re-enroll \
+             this probe (`enroll_probe`, with only it attached) for the new board; that replaces \
+             its current row ({}) and displaces any row already holding the role you enroll it \
+             under on another probe",
+            self.probe_serial, as_, self.enrolled_chip, self.requested_chip, as_
+        )
+    }
+}
+
+impl std::error::Error for RequestedChipMismatch {}
+
+/// Compares the chip a caller asks for with the enrolled row's, by name,
+/// ignoring ASCII case and surrounding whitespace (decision 44). Pure: no
+/// probe, no store. An empty name on either side is "not declared" and
+/// passes, as today — the identity gate still decides.
+pub fn check_requested_chip(
+    known: &EnrolledBoard,
+    requested_chip: &str,
+) -> std::result::Result<(), RequestedChipMismatch> {
+    let (enrolled, requested) = (known.chip.trim(), requested_chip.trim());
+    if enrolled.is_empty() || requested.is_empty() || enrolled.eq_ignore_ascii_case(requested) {
+        return Ok(());
+    }
+    Err(RequestedChipMismatch {
+        probe_serial: known.probe_serial.clone().unwrap_or_default(),
+        enrolled_name: known.name.clone(),
+        enrolled_chip: known.chip.clone(),
+        enrolled_role: known.role.clone(),
+        requested_chip: requested_chip.to_string(),
+    })
+}
+
+/// [`validate_serial_timed`] preceded by [`check_requested_chip`]: the
+/// enrolled row is found, the requested chip compared, and only then is the
+/// probe opened. Additive — `validate_serial*` keep their signature and
+/// meaning (decision 44).
+pub fn validate_serial_for_chip(serial: &str, requested_chip: &str) -> Result<Validation> {
+    let known = enrollment::find(serial)?.with_context(|| {
+        format!(
+            "probe '{serial}' is not enrolled — enroll it first (`embarch-topology enroll`), \
+             with only this board's probe attached"
+        )
+    })?;
+    check_requested_chip(&known, requested_chip).map_err(anyhow::Error::new)?;
+    let (board, validated_at_utc_ms) = validate_known_timed(known)?;
+    Ok(Validation { board, validated_at_utc_ms })
+}
+
 /// Validate by enrollment `role` rather than by serial — for a link that
 /// isn't itself a probe-rs-recognized debug probe at all (dev-bench's UART
 /// bridge chip; see `super::port`'s own doc comment). `embarch-core`'s
@@ -773,5 +847,32 @@ mod tests {
         let err = select_probe(vec![probe("a", Some("S1"))], Some("does-not-exist"), "flash")
             .expect_err("a serial matching nothing attached must refuse");
         assert!(err.to_string().contains("no attached probe with serial 'does-not-exist'"));
+    }
+
+    #[test]
+    fn requested_chip_differing_is_refused_naming_everything() {
+        let err = check_requested_chip(&board(), "STM32G0B1VE").expect_err("different family must refuse");
+        let msg = err.to_string();
+        for want in ["serial", "dev-bench", "bench-nrf54l15dk", "nRF54L15", "STM32G0B1VE", "enroll_probe", "Nothing was attached"] {
+            assert!(msg.contains(want), "missing {want}: {msg}");
+        }
+    }
+
+    #[test]
+    fn requested_chip_equal_or_undeclared_passes() {
+        assert!(check_requested_chip(&board(), "nRF54L15").is_ok());
+        assert!(check_requested_chip(&board(), " nrf54l15 ").is_ok());
+        assert!(check_requested_chip(&board(), "").is_ok());
+        let mut b = board();
+        b.chip = String::new();
+        assert!(check_requested_chip(&b, "STM32G0B1VE").is_ok());
+    }
+
+    #[test]
+    fn requested_chip_bench_board_is_named_by_board() {
+        let mut b = board();
+        b.role = enrollment::NO_ROLE.into();
+        let msg = check_requested_chip(&b, "STM32G0B1VE").unwrap_err().to_string();
+        assert!(msg.contains("bench board 'bench-nrf54l15dk'"), "{msg}");
     }
 }
