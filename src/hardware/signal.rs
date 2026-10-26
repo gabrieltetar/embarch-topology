@@ -158,7 +158,9 @@ impl std::error::Error for SignalMismatch {}
 /// exposing several serial interfaces (decision 46). **Not** a
 /// [`SignalMismatch`]: the port is present, so a caller that waits for a
 /// missing port to re-enumerate (Core's exchange) must not wait on this, and
-/// it is never guessed past.
+/// it is never guessed past. `hardware`-only, like `resolve_link_port`, the
+/// one thing that produces it.
+#[cfg(feature = "hardware")]
 #[derive(Debug)]
 pub struct SignalAmbiguous {
     pub name: String,
@@ -168,6 +170,7 @@ pub struct SignalAmbiguous {
     pub candidates: Vec<DetectedPort>,
 }
 
+#[cfg(feature = "hardware")]
 impl std::fmt::Display for SignalAmbiguous {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let ports = self
@@ -190,6 +193,7 @@ impl std::fmt::Display for SignalAmbiguous {
     }
 }
 
+#[cfg(feature = "hardware")]
 impl std::error::Error for SignalAmbiguous {}
 
 /// No signal is declared under this name — a normal, expected state (nothing

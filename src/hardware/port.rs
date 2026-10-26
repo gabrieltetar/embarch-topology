@@ -593,7 +593,9 @@ pub fn select(ports: &[SerialPortInfo], filter: &Filter) -> Result<DetectedPort>
 /// A declared USB serial matched several ports (decision 46): one device
 /// exposing several serial interfaces. Returned by [`select`] only when the
 /// filter was built by [`Filter::for_declared_serial`]; never a guess, and
-/// distinct from [`NotFound`] because the port is present.
+/// distinct from [`NotFound`] because the port is present. `hardware`-only,
+/// like [`select`], the one thing that produces it.
+#[cfg(feature = "hardware")]
 #[derive(Debug)]
 pub struct AmbiguousDeclaredSerial {
     pub serial: String,
@@ -601,6 +603,7 @@ pub struct AmbiguousDeclaredSerial {
     pub candidates: Vec<DetectedPort>,
 }
 
+#[cfg(feature = "hardware")]
 impl std::fmt::Display for AmbiguousDeclaredSerial {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -613,6 +616,7 @@ impl std::fmt::Display for AmbiguousDeclaredSerial {
     }
 }
 
+#[cfg(feature = "hardware")]
 impl std::error::Error for AmbiguousDeclaredSerial {}
 
 #[cfg(feature = "hardware")]
