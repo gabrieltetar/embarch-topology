@@ -184,15 +184,35 @@ fn load_at(path: &Path) -> Result<Store> {
         .with_context(|| format!("failed to parse enrollment file at {}", path.display()))
 }
 
+/// Writes to a sibling temp file, syncs it, then renames it over the store
+/// (decision 43). A failure at any step before the rename leaves the previous
+/// file untouched; `std::fs::write` truncated first, so a cut write left a
+/// partial file every `load_at` refuses, or an empty one that parses as an
+/// empty store (every field is `#[serde(default)]`) and loses everything.
 #[cfg(feature = "hardware")]
 fn save_at(path: &Path, store: &Store) -> Result<()> {
+    use std::io::Write;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("failed to create directory {}", parent.display()))?;
     }
     let contents = toml::to_string_pretty(store).context("failed to serialize enrollment")?;
-    std::fs::write(path, contents)
-        .with_context(|| format!("failed to write enrollment file at {}", path.display()))
+    let mut tmp_name = path.as_os_str().to_owned();
+    tmp_name.push(".tmp");
+    let tmp = std::path::PathBuf::from(tmp_name);
+    let written = (|| -> std::io::Result<()> {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(contents.as_bytes())?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp, path)
+    })();
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e)
+            .with_context(|| format!("failed to write enrollment file at {}", path.display()));
+    }
+    Ok(())
 }
 
 /// The whole store, for callers that own one of its tables
@@ -272,18 +292,36 @@ pub fn list() -> Result<Vec<EnrolledBoard>> {
 /// since this function itself never creates that state) reports the first
 /// one found displaced and silently removes the rest: `find` below returns
 /// one, `retain` removes every row sharing `role`.
+/// What [`upsert_reporting`] removed or moved, so enrolling can say it out
+/// loud (decisions 20 and 42).
 #[cfg(feature = "hardware")]
-pub fn upsert(board: EnrolledBoard) -> Result<Option<EnrolledBoard>> {
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Upserted {
+    /// The row that held the new row's role under a different probe.
+    pub displaced: Option<EnrolledBoard>,
+    /// The row **this probe** held under a different role, as it was. Set
+    /// only when that was a real role: leaving a bench board for a role
+    /// vacates nothing role-keyed.
+    pub vacated: Option<EnrolledBoard>,
+    /// Whether `vacated`'s board-type half and link facts stay on record,
+    /// probe half cleared. False only when it had neither name nor chip nor
+    /// link facts, so there was nothing to keep.
+    pub vacated_kept: bool,
+}
+
+/// `upsert`'s whole contract (above), now also reporting the row the probe
+/// vacated. It replaced `upsert`, which returned `displaced` only and had no
+/// caller outside this crate's own `validate::enroll`.
+#[cfg(feature = "hardware")]
+pub fn upsert_reporting(board: EnrolledBoard) -> Result<Upserted> {
     upsert_at(&paths::enrollment_path()?, board)
 }
 
 /// [`upsert`]'s whole body, against an explicit path. Split out so the
 /// role-uniqueness rule above is testable for real rather than
-/// re-implemented in a test against a temp file — the shape three tests in
-/// this module were already in, and precisely why nobody noticed the rule
-/// was missing.
+/// re-implemented in a test against a temp file.
 #[cfg(feature = "hardware")]
-fn upsert_at(path: &Path, board: EnrolledBoard) -> Result<Option<EnrolledBoard>> {
+fn upsert_at(path: &Path, board: EnrolledBoard) -> Result<Upserted> {
     let mut store = load_at(path)?;
 
     // **A bench board displaces nothing but its own probe's row** (decision
@@ -299,16 +337,39 @@ fn upsert_at(path: &Path, board: EnrolledBoard) -> Result<Option<EnrolledBoard>>
 
     // **A row with no probe is never treated as sharing one.** Matching on
     // `Option` equality alone would make two boardless roles collide on
-    // `None == None` and silently delete each other, which is the state a
-    // bench is in the moment both roles have a board type and neither has
-    // been wired up yet.
+    // `None == None` and silently delete each other.
     let same_probe = |b: &EnrolledBoard| {
         board.probe_serial.is_some() && b.probe_serial == board.probe_serial
     };
+
+    // **A probe moving between roles vacates one** (decision 42): its old
+    // row shares the probe, not the role, so the retain below would drop it
+    // unreported, board-type half and all. Report it, and keep what is not
+    // the probe's.
+    let vacated = store
+        .boards
+        .iter()
+        .find(|b| same_probe(b) && b.role != NO_ROLE && b.role != board.role)
+        .cloned();
+    let kept = vacated.as_ref().and_then(|v| {
+        let keeps = !v.name.is_empty()
+            || !v.chip.is_empty()
+            || v.link_port_serial.is_some()
+            || v.link_port_interface.is_some();
+        keeps.then(|| EnrolledBoard {
+            probe_serial: None,
+            hardware_id: None,
+            confirmed_at_utc_ms: None,
+            ..v.clone()
+        })
+    });
+    let vacated_kept = kept.is_some();
+
     store.boards.retain(|b| !same_probe(b) && !(holds_role && b.role == board.role));
+    store.boards.extend(kept);
     store.boards.push(board);
     save_at(path, &store)?;
-    Ok(displaced)
+    Ok(Upserted { displaced, vacated, vacated_kept })
 }
 
 /// Declares **which board type is in `role`**, without opening anything
@@ -568,8 +629,8 @@ mod tests {
         second.role = NO_ROLE.to_string();
         second.name = "drp-bench".to_string();
 
-        assert_eq!(upsert_at(&path, pd_partner.clone()).unwrap(), None);
-        assert_eq!(upsert_at(&path, second.clone()).unwrap(), None);
+        assert_eq!(upsert_at(&path, pd_partner.clone()).unwrap().displaced, None);
+        assert_eq!(upsert_at(&path, second.clone()).unwrap().displaced, None);
 
         let boards = load_at(&path).unwrap().boards;
         assert_eq!(boards.len(), 4, "both roles and both bench boards stay: {boards:?}");
@@ -577,7 +638,7 @@ mod tests {
 
         // Re-enrolling a bench board replaces its own row only.
         pd_partner.name = "pd-bench-snk1m1".to_string();
-        assert_eq!(upsert_at(&path, pd_partner.clone()).unwrap(), None);
+        assert_eq!(upsert_at(&path, pd_partner.clone()).unwrap().displaced, None);
         let boards = load_at(&path).unwrap().boards;
         assert_eq!(boards.len(), 4);
         assert!(boards.contains(&pd_partner));
@@ -637,7 +698,7 @@ mod tests {
         new_bench.role = "dev-bench".to_string();
         new_bench.chip = "nRF54L15".to_string();
 
-        let displaced = upsert_at(&path, new_bench.clone()).unwrap();
+        let displaced = upsert_at(&path, new_bench.clone()).unwrap().displaced;
         assert_eq!(displaced, Some(old_bench));
 
         let boards = load_at(&path).unwrap().boards;
@@ -660,6 +721,109 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// Decision 42: a probe moving role -> role vacates a role, says so, and
+    /// leaves the board-type half and link facts on record, probe cleared.
+    #[test]
+    fn probe_moving_between_roles_reports_and_keeps_the_vacated_board_type() {
+        let dir = temp_path("vacate-dir");
+        let path = dir.join("enrollment.toml");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut bench = sample("001057729826");
+        bench.role = "dev-bench".to_string();
+        bench.name = "nrf54l15dk".to_string();
+        bench.link_port_serial = Some("LINK".to_string());
+        bench.link_port_interface = Some(2);
+        save_at(&path, &Store { boards: vec![bench.clone()], ..Store::default() }).unwrap();
+
+        let mut as_dut = sample("001057729826");
+        as_dut.role = DUT_ROLE.to_string();
+        as_dut.link_port_serial = None;
+        let out = upsert_at(&path, as_dut.clone()).unwrap();
+        assert_eq!(out.displaced, None);
+        assert_eq!(out.vacated, Some(bench.clone()));
+        assert!(out.vacated_kept);
+
+        let boards = load_at(&path).unwrap().boards;
+        let left = boards.iter().find(|b| b.role == "dev-bench").expect("vacated role kept");
+        assert_eq!(left.probe_serial, None);
+        assert_eq!(left.hardware_id, None);
+        assert_eq!(left.confirmed_at_utc_ms, None);
+        assert_eq!(left.name, "nrf54l15dk");
+        assert_eq!(left.link_port_serial.as_deref(), Some("LINK"));
+        assert_eq!(left.link_port_interface, Some(2));
+        let moved = boards.iter().find(|b| b.role == DUT_ROLE).unwrap();
+        assert_eq!(moved.link_port_serial, None, "link facts stay with the role, not the probe");
+        assert_eq!(boards.len(), 2);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Role -> bench board vacates the role too; a row with nothing but its
+    /// probe has nothing to keep, and says so.
+    #[test]
+    fn role_to_bench_board_reports_the_vacated_role() {
+        let dir = temp_path("vacate-bench-dir");
+        let path = dir.join("enrollment.toml");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut bench = sample("001057729826");
+        bench.role = "dev-bench".to_string();
+        save_at(&path, &Store { boards: vec![bench.clone()], ..Store::default() }).unwrap();
+        let mut bare = bench.clone();
+        bare.name = String::new();
+        bare.chip = String::new();
+        save_at(&path, &Store { boards: vec![bare.clone()], ..Store::default() }).unwrap();
+
+        let mut as_bench = sample("001057729826");
+        as_bench.role = NO_ROLE.to_string();
+        let out = upsert_at(&path, as_bench.clone()).unwrap();
+        assert_eq!(out.vacated, Some(bare));
+        assert!(!out.vacated_kept);
+        assert_eq!(load_at(&path).unwrap().boards, vec![as_bench.clone()]);
+
+        // With a board type it is kept, and bench -> role vacates nothing.
+        save_at(&path, &Store { boards: vec![bench.clone()], ..Store::default() }).unwrap();
+        let out = upsert_at(&path, as_bench.clone()).unwrap();
+        assert_eq!(out.vacated, Some(bench));
+        assert!(out.vacated_kept);
+        let mut back = sample("001057729826");
+        back.role = "dut".to_string();
+        let out = upsert_at(&path, back).unwrap();
+        assert_eq!(out.vacated, None, "a bench board holds no role to vacate");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Decision 42: a write that fails before the rename leaves the previous
+    /// file loadable and byte-identical, and no temp file behind.
+    #[test]
+    fn failed_write_leaves_the_previous_store_untouched() {
+        let dir = temp_path("atomic-dir");
+        let path = dir.join("enrollment.toml");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut store = Store::default();
+        store.boards.push(sample("a-serial"));
+        save_at(&path, &store).unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        // A directory squatting on the temp name makes the write fail first.
+        let tmp = dir.join("enrollment.toml.tmp");
+        std::fs::create_dir(&tmp).unwrap();
+        store.boards.push(sample("b-serial"));
+        assert!(save_at(&path, &store).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(load_at(&path).unwrap().boards.len(), 1);
+
+        std::fs::remove_dir(&tmp).unwrap();
+        save_at(&path, &store).unwrap();
+        assert_eq!(load_at(&path).unwrap().boards.len(), 2);
+        assert!(!tmp.exists(), "the temp file is renamed away");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Re-enrolling the *same* probe under the same role displaces nothing —
     /// the ordinary idempotent case must not report a phantom replacement.
     #[test]
@@ -669,8 +833,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
 
         let board = sample("001057729826");
-        assert_eq!(upsert_at(&path, board.clone()).unwrap(), None);
-        assert_eq!(upsert_at(&path, board).unwrap(), None);
+        assert_eq!(upsert_at(&path, board.clone()).unwrap().displaced, None);
+        assert_eq!(upsert_at(&path, board).unwrap().displaced, None);
         assert_eq!(load_at(&path).unwrap().boards.len(), 1);
 
         std::fs::remove_dir_all(&dir).ok();

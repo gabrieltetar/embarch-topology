@@ -30,7 +30,7 @@ mod validate;
 
 pub use alert::{Alert, UI_HOST, UI_PORT};
 pub use bootload::{AmbiguousUsbPort, BootloadPorts, UsbPortId};
-pub use enrollment::{is_canonical_role, EnrolledBoard, CANONICAL_ROLES, DUT_ROLE, NO_ROLE};
+pub use enrollment::{is_canonical_role, EnrolledBoard, Upserted, CANONICAL_ROLES, DUT_ROLE, NO_ROLE};
 #[cfg(feature = "hardware")]
 pub use hardware_id::{compare_self_reported, SelfReportedIdentity};
 #[cfg(feature = "hardware")]

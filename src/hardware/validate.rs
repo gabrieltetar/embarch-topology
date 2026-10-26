@@ -578,6 +578,17 @@ pub fn enroll(
     probe_serial: Option<&str>,
     name: &str,
 ) -> Result<EnrolledBoard> {
+    Ok(enroll_reporting(role, chip, probe_serial, name)?.0)
+}
+
+/// [`enroll`], also returning what the write displaced or vacated
+/// (decision 42), so a caller can report it rather than only the log.
+pub fn enroll_reporting(
+    role: &str,
+    chip: &str,
+    probe_serial: Option<&str>,
+    name: &str,
+) -> Result<(EnrolledBoard, enrollment::Upserted)> {
     let lister = Lister::new();
     let probes = lister.list_all();
     let info = select_probe(probes, probe_serial, "enroll")?;
@@ -606,6 +617,10 @@ pub fn enroll(
     // silicon must NOT inherit them, because they describe the old board's
     // physical USB link and nothing about the new one.
     let prior = enrollment::find(&serial).ok().flatten();
+    // And only under the *same role* (decision 42): they describe a role's
+    // link, so a probe moving to another role leaves them with the role it
+    // left.
+    let prior = prior.filter(|b| b.role == role);
     let link_port_serial = prior.as_ref().and_then(|b| b.link_port_serial.clone());
     let link_port_interface = prior.and_then(|b| b.link_port_interface);
 
@@ -628,7 +643,21 @@ pub fn enroll(
     // nRF54L15DK again — but it is never a thing to do *quietly*: the board
     // that just lost the role is no longer reachable by the only name
     // anything in this suite addresses it by.
-    if let Some(displaced) = enrollment::upsert(board.clone())? {
+    let outcome = enrollment::upsert_reporting(board.clone())?;
+    if let Some(v) = &outcome.vacated {
+        tracing::warn!(
+            "probe {} moved from role '{}' to {}; the role is {}",
+            board.probe_serial.as_deref().unwrap_or("(none)"),
+            v.role,
+            if board.role.is_empty() { "a bench board".to_string() } else { format!("role '{}'", board.role) },
+            if outcome.vacated_kept {
+                "kept with its board type and link facts, no probe bound"
+            } else {
+                "gone from the store"
+            },
+        );
+    }
+    if let Some(displaced) = &outcome.displaced {
         tracing::warn!(
             "role '{}' moved from probe {} (chip {}, hardware_id {}) to probe {} (chip {}, \
              hardware_id {}); the old board is no longer enrolled under any role",
@@ -641,7 +670,7 @@ pub fn enroll(
             board.hardware_id.as_deref().unwrap_or("(none)"),
         );
     }
-    Ok(board)
+    Ok((board, outcome))
 }
 
 #[cfg(test)]
