@@ -131,6 +131,13 @@ pub fn declare_signal(link: SignalLink) -> anyhow::Result<()> {
     signal::declare(link)
 }
 
+/// The board enrolled on this probe, whether it holds a role or is a bench
+/// board (decision 41). `Ok(None)` when no board is enrolled on it.
+#[cfg(feature = "hardware")]
+pub fn find_enrolled_by_probe(probe_serial: &str) -> anyhow::Result<Option<EnrolledBoard>> {
+    enrollment::find(probe_serial)
+}
+
 /// The enrolled board a declared signal leaves — its role's board, or the
 /// bench board on its probe (decision 48). `Ok(None)` when nothing is
 /// enrolled there now.
