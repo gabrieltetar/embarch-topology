@@ -43,7 +43,7 @@ pub use port::{
 };
 #[cfg(feature = "hardware")]
 pub use port::AmbiguousDeclaredSerial;
-pub use signal::{Route, SignalDirection, SignalLink, SignalMismatch, SignalNotDeclared};
+pub use signal::{Route, SignalDirection, SignalLink, SignalMismatch, SignalNotDeclared, SignalOrigin};
 #[cfg(feature = "hardware")]
 pub use signal::SignalAmbiguous;
 #[cfg(feature = "hardware")]
@@ -129,6 +129,14 @@ pub fn find_signal(name: &str) -> anyhow::Result<Option<SignalLink>> {
 #[cfg(feature = "hardware")]
 pub fn declare_signal(link: SignalLink) -> anyhow::Result<()> {
     signal::declare(link)
+}
+
+/// The enrolled board a declared signal leaves — its role's board, or the
+/// bench board on its probe (decision 48). `Ok(None)` when nothing is
+/// enrolled there now.
+#[cfg(feature = "hardware")]
+pub fn find_signal_origin_board(link: &SignalLink) -> anyhow::Result<Option<EnrolledBoard>> {
+    signal::find_origin_board(link)
 }
 
 /// Removes a declared signal. `Ok(false)` if nothing was declared under

@@ -59,8 +59,18 @@ pub struct SignalLink {
     /// outpost's UART. Not validated against
     /// [`enrollment`](super::enrollment) here: a wire can be declared before
     /// the board it leaves is enrolled, and refusing that would just move
-    /// the ordering problem around.
+    /// the ordering problem around. Empty when [`origin_board`](Self::origin_board)
+    /// is the origin instead (decision 48).
     pub origin_role: String,
+    /// The bench board the signal leaves, by its probe serial, for a board
+    /// that holds no role (decision 41's bench board; decision 48). `None` in
+    /// every row declared before it existed, which keeps `origin_role` the
+    /// origin, so no enrollment file needs migrating, and omitted when absent.
+    /// A declaration may name the board by its enrolled name instead:
+    /// [`declare`] resolves that to the probe serial before the row is
+    /// stored, because a name changes on re-enrolment and the probe is the key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_board: Option<String>,
     pub direction: SignalDirection,
     pub route: Route,
     /// The line rate this signal runs at, when it is not Core's default
@@ -81,6 +91,43 @@ impl SignalLink {
     pub fn host_can_write(&self) -> bool {
         matches!(self.direction, SignalDirection::HostToDut | SignalDirection::Bidirectional)
             && matches!(self.route, Route::Direct { .. })
+    }
+
+    /// Which board the signal leaves: a role, or a bench board by its probe
+    /// serial (decision 48). What a caller resolves when it must reset or
+    /// read the board a signal comes out of.
+    pub fn origin(&self) -> SignalOrigin<'_> {
+        match self.origin_board.as_deref() {
+            Some(probe_serial) => SignalOrigin::Board { probe_serial },
+            None => SignalOrigin::Role(&self.origin_role),
+        }
+    }
+}
+
+/// Where a [`SignalLink`] comes out of (decision 48).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignalOrigin<'a> {
+    /// An enrollment role; the signal follows whatever board holds it.
+    Role(&'a str),
+    /// One bench board, by the probe serial it is enrolled under.
+    Board { probe_serial: &'a str },
+}
+
+impl std::fmt::Display for SignalOrigin<'_> {
+    /// `role 'dut'` or `bench board on probe '…'`, for refusal text.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SignalOrigin::Role(role) => write!(f, "role '{role}'"),
+            SignalOrigin::Board { probe_serial } => write!(f, "bench board on probe '{probe_serial}'"),
+        }
+    }
+}
+
+/// The text a signal error names its origin by: the board when there is one.
+fn origin_text(origin_role: &str, origin_board: Option<&str>) -> String {
+    match origin_board {
+        Some(probe_serial) => SignalOrigin::Board { probe_serial }.to_string(),
+        None => SignalOrigin::Role(origin_role).to_string(),
     }
 }
 
@@ -147,6 +194,9 @@ pub enum Route {
 pub struct SignalMismatch {
     pub name: String,
     pub origin_role: String,
+    /// The link's [`SignalLink::origin_board`], named instead of the role
+    /// when set (decision 48).
+    pub origin_board: Option<String>,
     /// The USB serial the `Direct` route declares, `None` for a
     /// `ViaDevBench` route.
     pub declared_port_serial: Option<String>,
@@ -157,8 +207,10 @@ impl std::fmt::Display for SignalMismatch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "signal-mismatch: signal '{}' (from role '{}') — {}",
-            self.name, self.origin_role, self.reason
+            "signal-mismatch: signal '{}' (from {}) — {}",
+            self.name,
+            origin_text(&self.origin_role, self.origin_board.as_deref()),
+            self.reason
         )
     }
 }
@@ -176,6 +228,8 @@ impl std::error::Error for SignalMismatch {}
 pub struct SignalAmbiguous {
     pub name: String,
     pub origin_role: String,
+    /// As [`SignalMismatch::origin_board`].
+    pub origin_board: Option<String>,
     pub declared_port_serial: String,
     /// Every matching port, ordered by interface then name.
     pub candidates: Vec<DetectedPort>,
@@ -192,13 +246,13 @@ impl std::fmt::Display for SignalAmbiguous {
             .join(", ");
         write!(
             f,
-            "signal-ambiguous: signal '{}' (from role '{}') — its declared USB serial '{}' matches \
+            "signal-ambiguous: signal '{}' (from {}) — its declared USB serial '{}' matches \
              {} ports: {ports}. Nothing declared says which interface carries it, so it is \
              refused rather than guessed; re-declare the signal with the interface that carries it \
              (embarch-api declare_signal's `interface`, or pick that port in embarch-ui's \
              Topology tab)",
             self.name,
-            self.origin_role,
+            origin_text(&self.origin_role, self.origin_board.as_deref()),
             self.declared_port_serial,
             self.candidates.len()
         )
@@ -249,15 +303,86 @@ pub fn find(name: &str) -> Result<Option<SignalLink>> {
 /// stale duplicates that could disagree about where the wire goes. That
 /// overwrite *is* the migration path decision 18 promises: moving the
 /// outpost onto dev-bench pins is one call here, not a redesign.
+///
+/// A board origin (decision 48) is resolved here, against the enrolled
+/// boards, and stored as a probe serial: see [`resolve_origin_board`].
 #[cfg(feature = "hardware")]
-pub fn declare(link: SignalLink) -> Result<()> {
+pub fn declare(mut link: SignalLink) -> Result<()> {
     if link.name.trim().is_empty() {
         anyhow::bail!("a signal needs a name; it is what a Study taps it by");
     }
     let mut store = enrollment::load_store()?;
+    if let Some(board) = link.origin_board.take() {
+        if !link.origin_role.trim().is_empty() {
+            anyhow::bail!(
+                "signal '{}' names both a role ('{}') and a board ('{board}') as its origin; name one",
+                link.name,
+                link.origin_role
+            );
+        }
+        link.origin_role.clear();
+        link.origin_board = Some(resolve_origin_board(&store.boards, &board)?);
+    } else if link.origin_role.trim().is_empty() {
+        anyhow::bail!(
+            "signal '{}' needs an origin: a role, or a bench board by its name or probe serial",
+            link.name
+        );
+    }
     store.signals.retain(|s| s.name != link.name);
     store.signals.push(link);
     enrollment::save_store(&store)
+}
+
+/// A declared board origin, as the probe serial it is stored by (decision
+/// 48). `reference` is a bench board's probe serial or its enrolled name.
+/// Unlike a role, which may be declared before anything is enrolled under it,
+/// the board must be enrolled now: a role is a short fixed vocabulary, a board
+/// reference is free text, and an unresolved one stored as-is would make a
+/// typo indistinguishable from a board not yet plugged in. A probe enrolled
+/// under a role is refused, so one board is never the origin by two names; the
+/// role is the origin to declare, and it follows whatever board holds it.
+#[cfg(feature = "hardware")]
+fn resolve_origin_board(boards: &[enrollment::EnrolledBoard], reference: &str) -> Result<String> {
+    let reference = reference.trim();
+    if let Some(board) = boards.iter().find(|b| b.probe_serial.as_deref() == Some(reference)) {
+        if board.role != enrollment::NO_ROLE {
+            anyhow::bail!(
+                "probe '{reference}' is enrolled under role '{}', not as a bench board; declare the \
+                 signal from that role (origin_role) instead",
+                board.role
+            );
+        }
+        return Ok(reference.to_string());
+    }
+    let named: Vec<_> = boards
+        .iter()
+        .filter(|b| b.role == enrollment::NO_ROLE && b.name == reference)
+        .filter_map(|b| b.probe_serial.clone())
+        .collect();
+    match named.as_slice() {
+        [probe_serial] => Ok(probe_serial.clone()),
+        [] => anyhow::bail!(
+            "no bench board is enrolled under the probe serial or name '{reference}'; enrol it first \
+             (POST /probes/enroll with no role), then declare the signal"
+        ),
+        several => anyhow::bail!(
+            "{} bench boards are enrolled under the name '{reference}' (probes {}); name the board by \
+             its probe serial",
+            several.len(),
+            several.join(", ")
+        ),
+    }
+}
+
+/// The enrolled board a signal leaves (decision 48): the board holding its
+/// role, or the bench board on its probe. `Ok(None)` when nothing is enrolled
+/// there now, which a caller reports by the signal's [`SignalLink::origin`].
+#[cfg(feature = "hardware")]
+pub fn find_origin_board(link: &SignalLink) -> Result<Option<enrollment::EnrolledBoard>> {
+    match link.origin() {
+        SignalOrigin::Role(role) => enrollment::find_by_role(role),
+        SignalOrigin::Board { probe_serial } => enrollment::find(probe_serial),
+    }
 }
 
 /// Removes a declared signal. `Ok(false)` if nothing was declared under that
@@ -302,6 +427,7 @@ fn resolve_link_port(link: &SignalLink) -> Result<DetectedPort> {
             return Err(anyhow::Error::new(SignalMismatch {
                 name: link.name.clone(),
                 origin_role: link.origin_role.clone(),
+                origin_board: link.origin_board.clone(),
                 declared_port_serial: None,
                 reason: "its route is via-dev-bench, so it has no port of its own — it arrives \
                          relayed over dev-bench's existing link, resolved by \
@@ -317,6 +443,7 @@ fn resolve_link_port(link: &SignalLink) -> Result<DetectedPort> {
             return anyhow::Error::new(SignalAmbiguous {
                 name: link.name.clone(),
                 origin_role: link.origin_role.clone(),
+                origin_board: link.origin_board.clone(),
                 declared_port_serial: port_serial.clone(),
                 candidates: amb.candidates.clone(),
             });
@@ -324,6 +451,7 @@ fn resolve_link_port(link: &SignalLink) -> Result<DetectedPort> {
         anyhow::Error::new(SignalMismatch {
             name: link.name.clone(),
             origin_role: link.origin_role.clone(),
+            origin_board: link.origin_board.clone(),
             declared_port_serial: Some(port_serial.clone()),
             reason: not_enumerable(port_serial, interface, &ports),
         })
@@ -462,6 +590,7 @@ mod tests {
         let amb = SignalAmbiguous {
             name: "console".into(),
             origin_role: "dut".into(),
+            origin_board: None,
             declared_port_serial: "FT9ABCDE".into(),
             candidates: vec![],
         };
@@ -492,6 +621,7 @@ mod tests {
         SignalLink {
             name: "outpost".to_string(),
             origin_role: "dut".to_string(),
+            origin_board: None,
             direction: SignalDirection::DutToHost,
             route: Route::Direct { port_serial: "FT9ABCDE".to_string(), interface: None },
             baud: None,
@@ -673,6 +803,73 @@ port_serial = "FT9ABCDE"
     struct Store {
         signals: Vec<SignalLink>,
     }
+
+    fn board(probe: &str, role: &str, name: &str) -> enrollment::EnrolledBoard {
+        enrollment::EnrolledBoard {
+            probe_serial: Some(probe.to_string()),
+            role: role.to_string(),
+            name: name.to_string(),
+            chip: "STM32G071RB".to_string(),
+            hardware_id: None,
+            confirmed_at_utc_ms: None,
+            link_port_serial: None,
+            link_port_interface: None,
+        }
+    }
+
+    /// Decision 48: every row on disk predates `origin_board`; it loads with
+    /// its role as the origin and writes back without the key.
+    #[test]
+    fn a_row_declared_before_origin_board_existed_keeps_its_role_as_the_origin() {
+        let old = "[[signals]]\nname = \"console\"\norigin_role = \"dut\"\ndirection = \"bidirectional\"\n\n\
+                   [signals.route]\nkind = \"direct\"\nport_serial = \"FT9ABCDE\"\n";
+        let store: Store = toml::from_str(old).unwrap();
+        assert_eq!(store.signals[0].origin_board, None);
+        assert_eq!(store.signals[0].origin(), SignalOrigin::Role("dut"));
+        assert!(!toml::to_string_pretty(&store).unwrap().contains("origin_board"));
+        let on_board = SignalLink { origin_role: String::new(), origin_board: Some("0671FF".into()), ..outpost_link() };
+        assert_eq!(on_board.origin(), SignalOrigin::Board { probe_serial: "0671FF" });
+        let text = toml::to_string_pretty(&Store { signals: vec![on_board.clone()] }).unwrap();
+        assert_eq!(toml::from_str::<Store>(&text).unwrap().signals[0], on_board);
+    }
+
+    /// Decision 48: a signal error names the bench board, not the empty role.
+    #[test]
+    fn a_signal_error_names_the_bench_board_it_leaves() {
+        let mismatch = SignalMismatch {
+            name: "pd-console".into(),
+            origin_role: String::new(),
+            origin_board: Some("0671FF".into()),
+            declared_port_serial: None,
+            reason: "x".into(),
+        };
+        assert!(mismatch.to_string().contains("(from bench board on probe '0671FF')"), "{mismatch}");
+        let by_role = SignalMismatch { origin_role: "dut".into(), origin_board: None, ..mismatch };
+        assert!(by_role.to_string().contains("(from role 'dut')"), "{by_role}");
+    }
+
+    /// Decision 48: a board origin resolves by probe serial or bench-board
+    /// name, to the probe serial; a role's probe, an unknown board and an
+    /// ambiguous name are refused.
+    #[test]
+    fn a_board_origin_resolves_to_one_enrolled_bench_board_probe() {
+        let boards = vec![
+            board("001057729826", "dev-bench", "nrf54l15dk"),
+            board("0671FF", NO_ROLE_FOR_TEST, "pd-bench"),
+            board("0672AA", NO_ROLE_FOR_TEST, "drp-bench"),
+            board("0673BB", NO_ROLE_FOR_TEST, "drp-bench"),
+        ];
+        assert_eq!(resolve_origin_board(&boards, "0671FF").unwrap(), "0671FF");
+        assert_eq!(resolve_origin_board(&boards, " pd-bench ").unwrap(), "0671FF");
+        let role = resolve_origin_board(&boards, "001057729826").unwrap_err().to_string();
+        assert!(role.contains("role 'dev-bench'"), "{role}");
+        let unknown = resolve_origin_board(&boards, "nucleo").unwrap_err().to_string();
+        assert!(unknown.contains("no bench board is enrolled") && unknown.contains("'nucleo'"), "{unknown}");
+        let twice = resolve_origin_board(&boards, "drp-bench").unwrap_err().to_string();
+        assert!(twice.contains("2 bench boards") && twice.contains("0672AA, 0673BB"), "{twice}");
+    }
+
+    const NO_ROLE_FOR_TEST: &str = enrollment::NO_ROLE;
 }
 
 #[cfg(all(test, feature = "hardware"))]
