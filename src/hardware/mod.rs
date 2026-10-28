@@ -19,6 +19,7 @@ mod alert;
 pub mod attach;
 pub mod bootload;
 mod enrollment;
+pub mod instrument;
 #[cfg(feature = "hardware")]
 pub mod hardware_id;
 #[cfg(feature = "hardware")]
@@ -30,6 +31,7 @@ mod validate;
 
 pub use alert::{Alert, UI_HOST, UI_PORT};
 pub use bootload::{AmbiguousUsbPort, BootloadPorts, UsbPortId};
+pub use instrument::{Ack, Instrument, InstrumentExchange, InstrumentProtocol, InstrumentReply};
 pub use enrollment::{is_canonical_role, EnrolledBoard, CANONICAL_ROLES, DUT_ROLE, NO_ROLE};
 #[cfg(feature = "hardware")]
 pub use enrollment::Upserted;

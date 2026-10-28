@@ -163,6 +163,10 @@ pub struct Store {
     /// that never declared one is rewritten byte-for-byte as it was.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bootload_ports: Vec<super::bootload::BootloadPorts>,
+    /// Declared bench instruments (decision 49). Skipped when empty, like
+    /// `bootload_ports`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub instruments: Vec<super::instrument::Instrument>,
 }
 
 #[cfg(feature = "hardware")]
