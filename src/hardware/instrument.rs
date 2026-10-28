@@ -67,8 +67,12 @@ pub struct Instrument {
     /// What ends one reply line.
     #[serde(default = "crlf")]
     pub read_terminator: String,
-    /// The least time between two commands to this instrument, from the end
-    /// of one write to the start of the next.
+    /// The least time between two exchanges with this instrument, measured by
+    /// Core from the end of the previous exchange (its reply read, or its
+    /// write flushed when nothing is read) to the start of the next write,
+    /// process-wide. The flush line sent after opening is an exchange too. So
+    /// the gap is never shorter than this and is usually longer by the
+    /// instrument's reply time; do not tune it down to allow for that.
     #[serde(default)]
     pub min_interval_ms: u32,
     /// Text a set answers with when it was carried out. With it declared, a
