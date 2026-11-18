@@ -117,8 +117,61 @@ jobs:
             echo "asset=dist/${name}.tar.gz" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Upload release asset
+      # The matrix only builds. It holds no `id-token` and publishes nothing:
+      # the one `sign` job below signs and publishes, so a release costs one
+      # approval of the `release` environment and the build jobs never see
+      # an OIDC token.
+      - name: Upload archive as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: archive-${{ matrix.target }}
+          path: ${{ steps.package.outputs.asset }}
+          if-no-files-found: error
+
+  # Signs every archive keylessly and publishes asset and bundle together.
+  # It must stay in this file, not a reusable workflow: the certificate's
+  # identity is this workflow at the tag,
+  #   https://github.com/gabrieltetar/embarch-topology/.github/workflows/release.yml@refs/tags/<tag>
+  # and a called workflow would put its own name there instead.
+  sign:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: archive-*
+          path: dist
+          merge-multiple: true
+
+      - uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: v3.0.4
+
+      - name: Sign every archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          cosign version
+          shopt -s nullglob
+          assets=(dist/*.zip dist/*.tar.gz)
+          if [ "${#assets[@]}" -ne 4 ]; then
+            echo "::error::expected 4 archives, found ${#assets[@]}"
+            exit 1
+          fi
+          for asset in "${assets[@]}"; do
+            cosign sign-blob --yes --bundle "${asset}.sigstore.json" "${asset}"
+          done
+          ls -l dist
+
+      - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ steps.package.outputs.asset }}
+          files: |
+            dist/*.zip
+            dist/*.tar.gz
+            dist/*.sigstore.json
           fail_on_unmatched_files: true
