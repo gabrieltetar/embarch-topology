@@ -38,7 +38,7 @@ pub use enrollment::Upserted;
 #[cfg(feature = "hardware")]
 pub use hardware_id::{compare_self_reported, SelfReportedIdentity};
 #[cfg(feature = "hardware")]
-pub use paths::{alert_log_path, data_dir, enrollment_path};
+pub use paths::{alert_log_path, data_dir, enrollment_path, set_data_dir};
 pub use port::{
     DetectedPort, DevBenchPort, ExcludingRule as DevBenchNotFoundRule,
     NotFound as DevBenchNotFound, DECLARED_SERIAL, DEV_BENCH_ROLE, ENUMERATED,
