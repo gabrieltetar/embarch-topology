@@ -138,6 +138,7 @@ mod tests {
             min_interval_ms: 0,
             ack_ok: None,
             ack_err: None,
+            safe_off: Vec::new(),
         })
         .unwrap();
         signal::declare(SignalLink {
@@ -147,6 +148,7 @@ mod tests {
             direction: SignalDirection::DutToHost,
             route: Route::Direct { port_serial: "FT9ABCDE".into(), interface: None },
             baud: None,
+            safe_off: None,
         })
         .unwrap();
 

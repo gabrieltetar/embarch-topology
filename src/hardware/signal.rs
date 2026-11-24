@@ -81,9 +81,25 @@ pub struct SignalLink {
     /// ignores the rate; declaring it is harmless.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub baud: Option<u32>,
+    /// One shell line Core sends to the bench board this signal leaves to
+    /// switch its outputs off (Core's safe-off at a graceful stop and at
+    /// start; decision 49). `None` when none is declared, and Core then lists
+    /// the signal as "no safe-off declared". Absent in every row declared
+    /// before it existed and omitted when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub safe_off: Option<String>,
 }
 
 impl SignalLink {
+    /// What a declaration must satisfy before it is stored: a `safe_off` line
+    /// is checked as an instrument's is.
+    pub fn check(&self) -> Result<(), String> {
+        match &self.safe_off {
+            Some(line) => super::instrument::check_safe_off_line(&format!("signal `{}`", self.name), line),
+            None => Ok(()),
+        }
+    }
+
     /// Whether Core may write to this signal: its direction carries bytes
     /// toward the DUT, and its route ends on a port Core opens itself
     /// (decision 37). A `ViaDevBench` route is refused here even when its
@@ -311,6 +327,7 @@ pub fn declare(mut link: SignalLink) -> Result<()> {
     if link.name.trim().is_empty() {
         anyhow::bail!("a signal needs a name; it is what a Study taps it by");
     }
+    link.check().map_err(anyhow::Error::msg)?;
     let mut store = enrollment::load_store()?;
     if let Some(board) = link.origin_board.take() {
         if !link.origin_role.trim().is_empty() {
@@ -625,7 +642,28 @@ mod tests {
             direction: SignalDirection::DutToHost,
             route: Route::Direct { port_serial: "FT9ABCDE".to_string(), interface: None },
             baud: None,
+            safe_off: None,
         }
+    }
+
+    #[test]
+    fn a_signals_safe_off_is_checked_and_round_trips() {
+        let mut link = outpost_link();
+        assert!(link.check().is_ok());
+        link.safe_off = Some("gpio clear 4".to_string());
+        assert!(link.check().is_ok());
+        let back: Store = toml::from_str(&toml::to_string_pretty(&Store { signals: vec![link.clone()] }).unwrap()).unwrap();
+        assert_eq!(back.signals, vec![link.clone()]);
+        let long = "x".repeat(super::super::instrument::MAX_SAFE_OFF_LINE_LEN + 1);
+        for bad in [String::new(), "a\nb".to_string(), "a\rb".to_string(), long] {
+            link.safe_off = Some(bad.clone());
+            assert!(link.check().unwrap_err().contains("safe_off"), "{bad:?}");
+        }
+        // A row written before the field loads and is rewritten byte for byte.
+        let fixture = toml::to_string_pretty(&Store { signals: vec![outpost_link()] }).unwrap();
+        assert!(!fixture.contains("safe_off"));
+        let old: Store = toml::from_str(&fixture).unwrap();
+        assert_eq!(toml::to_string_pretty(&old).unwrap(), fixture);
     }
 
     #[test]

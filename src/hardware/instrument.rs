@@ -42,6 +42,30 @@ pub const MAX_NAME_LEN: usize = 64;
 /// park a study step for minutes.
 pub const MAX_MIN_INTERVAL_MS: u32 = 10_000;
 
+/// The longest safe-off line, for an instrument or a bench board's signal.
+/// Mirrors the write cap Core puts on an exchange's `line` (4096 bytes); this
+/// crate cannot depend on Core, so the number is repeated here, assumed equal.
+pub const MAX_SAFE_OFF_LINE_LEN: usize = 4096;
+
+/// A safe-off line is checked as an exchange's `line` is: not empty, no CR or
+/// LF (the terminator is added by Core), within the write cap. `owner` names
+/// the declaration in the message.
+pub fn check_safe_off_line(owner: &str, line: &str) -> Result<(), String> {
+    if line.is_empty() {
+        return Err(format!("{owner}'s safe_off holds an empty line; leave it out instead"));
+    }
+    if line.contains(['\r', '\n']) {
+        return Err(format!("{owner}'s safe_off line holds a CR or LF: one command per line, the terminator is added"));
+    }
+    if line.len() > MAX_SAFE_OFF_LINE_LEN {
+        return Err(format!(
+            "{owner}'s safe_off line is {} bytes; at most {MAX_SAFE_OFF_LINE_LEN}",
+            line.len()
+        ));
+    }
+    Ok(())
+}
+
 fn lf() -> String {
     "\n".to_string()
 }
@@ -83,6 +107,13 @@ pub struct Instrument {
     /// reply without `ack_ok` is unacknowledged whether or not it holds this.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ack_err: Option<String>,
+    /// Lines sent in order, with this instrument's terminators and pacing, to
+    /// switch its output off (Core's safe-off at a graceful stop and at start).
+    /// Empty when none is declared; Core then lists it as "no safe-off
+    /// declared". Absent in every row declared before it existed and omitted
+    /// when empty, so a store is rewritten unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub safe_off: Vec<String>,
 }
 
 impl Instrument {
@@ -125,6 +156,10 @@ impl Instrument {
         }
         if self.ack_ok.is_some() && self.ack_ok == self.ack_err {
             return Err(format!("instrument `{}`'s ack_ok and ack_err are the same text", self.name));
+        }
+        let owner = format!("instrument `{}`", self.name);
+        for line in &self.safe_off {
+            check_safe_off_line(&owner, line)?;
         }
         Ok(())
     }
@@ -308,6 +343,7 @@ mod tests {
             min_interval_ms: 200,
             ack_ok: Some("Rexecu success".into()),
             ack_err: Some("Rexecu err".into()),
+            safe_off: Vec::new(),
         }
     }
 
@@ -334,6 +370,19 @@ mod tests {
         let mut i = load("eload", "1a86:7523");
         i.ack_err = i.ack_ok.clone();
         assert!(i.check().is_err());
+    }
+
+    #[test]
+    fn a_safe_off_line_is_checked() {
+        let mut i = load("eload", "1a86:7523");
+        i.safe_off = vec!["INP OFF".into(), "CURR 0".into()];
+        assert!(i.check().is_ok());
+        for bad in [String::new(), "A\nB".into(), "A\rB".into(), "x".repeat(MAX_SAFE_OFF_LINE_LEN + 1)] {
+            i.safe_off = vec!["INP OFF".into(), bad.clone()];
+            assert!(i.check().unwrap_err().contains("safe_off"), "{bad:?}");
+        }
+        i.safe_off = vec!["x".repeat(MAX_SAFE_OFF_LINE_LEN)];
+        assert!(i.check().is_ok());
     }
 
     #[test]
@@ -397,6 +446,7 @@ mod tests {
         let i: Instrument = serde_json::from_str(json).unwrap();
         assert_eq!((i.protocol, i.write_terminator.as_str(), i.read_terminator.as_str()), (InstrumentProtocol::Scpi, "\n", "\r\n"));
         assert_eq!((i.min_interval_ms, i.ack_ok, i.ack_err), (0, None, None));
+        assert!(i.safe_off.is_empty());
         let x: InstrumentExchange = serde_json::from_str(r#"{"line":"*IDN?","query":true}"#).unwrap();
         assert_eq!((x.timeout_ms, x.port_wait_ms), (DEFAULT_TIMEOUT_MS, 0));
     }
@@ -410,6 +460,21 @@ mod tests {
         let text = toml::to_string_pretty(&store).unwrap();
         let back: Store = toml::from_str(&text).unwrap();
         assert_eq!(back.instruments, store.instruments);
+
+        let mut with = load("psu", "0403:6001");
+        with.safe_off = vec!["OUTP OFF".into(), "VOLT 0".into()];
+        store.instruments.push(with);
+        let back: Store = toml::from_str(&toml::to_string_pretty(&store).unwrap()).unwrap();
+        assert_eq!(back.instruments, store.instruments);
+
+        // A store written before the field loads and is rewritten byte for byte.
+        let fixture = "boards = []\nsignals = []\n\n[[instruments]]\nname = \"eload\"\nprotocol = \"scpi\"\nbaud = 9600\nwrite_terminator = \"\\n\"\nread_terminator = \"\\r\\n\"\nmin_interval_ms = 200\n\n[instruments.port]\nvid = 6790\npid = 29987\n";
+        let old: Store = toml::from_str(fixture).unwrap();
+        assert!(old.instruments[0].safe_off.is_empty());
+        let rewritten = toml::to_string_pretty(&old).unwrap();
+        assert!(!rewritten.contains("safe_off"));
+        let again: Store = toml::from_str(&rewritten).unwrap();
+        assert_eq!(toml::to_string_pretty(&again).unwrap(), rewritten);
 
         let older: Store = toml::from_str("boards = []\nsignals = []\n").unwrap();
         assert!(older.instruments.is_empty());
