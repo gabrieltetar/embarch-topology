@@ -9,6 +9,8 @@
 //! `list_attached_probes`, etc.) stays right where it was, in `hardware`
 //! below — only the page/server that rendered them here is gone.
 
+mod registry;
+
 use clap::{Parser, Subcommand};
 use embarch_topology::hardware;
 use embarch_topology::software::{self, DEFAULT_CORE_PORT};
@@ -238,11 +240,36 @@ fn check_enroll_role(role: &str, name: &str) -> anyhow::Result<()> {
 /// local-bootstrap machine that has no Core yet to ask, which is why this
 /// crate's own functions stay reachable rather than becoming a thin HTTP
 /// client (dispatch note, `tasks/topology/011`).
+///
+/// **A registered Core service refuses first, before any probe or store is
+/// opened** (decisions 28 and 23, amended 2026-11-24): the OS is asked through
+/// [`registry::ServiceRegistry`], and a service that is registered owns the
+/// store whether it is running, stopped or listening somewhere `--core-port`
+/// does not name.
 fn refuse_if_core_reachable(
     rt: &tokio::runtime::Runtime,
     core_port: u16,
     endpoint: &str,
 ) -> anyhow::Result<()> {
+    refuse_with(&registry::SystemRegistry, rt, core_port, endpoint)
+}
+
+fn refuse_with(
+    registry: &dyn registry::ServiceRegistry,
+    rt: &tokio::runtime::Runtime,
+    core_port: u16,
+    endpoint: &str,
+) -> anyhow::Result<()> {
+    if let Some(r) = registry.registrations().first() {
+        anyhow::bail!(
+            "refusing: a Core service is registered ({}) and is the only writer of the identity \
+             store (embarch-topology decisions 23 and 28), running or stopped — run this \
+             against Core instead:\n  {}{endpoint}\nBootstrap with no Core service registered \
+             still runs locally.",
+            r.source,
+            r.base_url(),
+        );
+    }
     let resolved = rt.block_on(software::resolve_software_topology(core_port, None, None));
     if let Some(w) = resolved.winner {
         anyhow::bail!(
@@ -254,6 +281,19 @@ fn refuse_if_core_reachable(
             w.base_url,
             w.class.as_str(),
             w.base_url,
+        );
+    }
+    Ok(())
+}
+
+/// `list` and `alerts` when the registered service runs `--service`: the store
+/// is Core's, and a file read here may be stale or the wrong machine's.
+fn refuse_stale_read(registry: &dyn registry::ServiceRegistry, route: &str) -> anyhow::Result<()> {
+    if let Some(r) = registry.registrations().iter().find(|r| r.service_mode) {
+        anyhow::bail!(
+            "the identity store is Core's ({} runs --service); ask it instead:\n  {route} at {}",
+            r.source,
+            r.base_url(),
         );
     }
     Ok(())
@@ -281,6 +321,7 @@ fn main() -> anyhow::Result<()> {
             print!("{}", render_dev_bench_port(&port));
         }
         Command::List => {
+            refuse_stale_read(&registry::SystemRegistry, "GET /probes/enrolled")?;
             for b in hardware::list_enrolled()? {
                 let name = if b.name.is_empty() { "(unnamed)" } else { b.name.as_str() };
                 print!(
@@ -406,6 +447,7 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Command::Alerts { limit } => {
+            refuse_stale_read(&registry::SystemRegistry, "GET /alerts")?;
             for a in hardware::recent_alerts(limit)? {
                 println!(
                     "{} role={} probe={} reason={}",
@@ -469,9 +511,68 @@ mod tests {
             }
         });
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-        let e = refuse_if_core_reachable(&rt, port, "/probes/enroll").unwrap_err().to_string();
+        let e = refuse_with(&Fake(vec![]), &rt, port, "/probes/enroll").unwrap_err().to_string();
         assert!(e.contains(&format!("127.0.0.1:{port}")), "{e}");
         assert!(e.contains(&format!("probed port {port}")), "{e}");
+    }
+
+    struct Fake(Vec<registry::Registration>);
+    impl registry::ServiceRegistry for Fake {
+        fn registrations(&self) -> Vec<registry::Registration> {
+            self.0.clone()
+        }
+    }
+
+    fn registered(bind: Option<&str>, service_mode: bool) -> Fake {
+        Fake(vec![registry::Registration {
+            source: "fake service".into(),
+            bind: bind.map(String::from),
+            port: None,
+            service_mode,
+        }])
+    }
+
+    /// Registered, nothing answering: every store write's route is named.
+    #[test]
+    fn registered_and_stopped_refuses_each_write_naming_its_route() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let fake = registered(None, false);
+        for route in [
+            "/probes/enroll",
+            "/probes/enrolled",
+            "/probes/enrolled/{role}/board",
+            "/validate",
+            "/dev-bench/link",
+        ] {
+            let e = refuse_with(&fake, &rt, 1, route).unwrap_err().to_string();
+            assert!(e.contains("fake service") && e.contains(route), "{e}");
+        }
+    }
+
+    /// Registered on a non-default bind with `--core-port` left alone: refused,
+    /// and the route names the registered bind rather than loopback.
+    #[test]
+    fn registered_on_a_nondefault_bind_refuses_without_core_port() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let e = refuse_with(&registered(Some("10.1.2.3"), false), &rt, DEFAULT_CORE_PORT, "/validate")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("http://10.1.2.3:4884/validate"), "{e}");
+    }
+
+    /// Not registered and nothing answering: local bootstrap, as before.
+    #[test]
+    fn not_registered_bootstraps() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        assert!(refuse_with(&Fake(vec![]), &rt, 1, "/probes/enroll").is_ok());
+    }
+
+    #[test]
+    fn service_mode_makes_reads_point_at_core() {
+        assert!(refuse_stale_read(&registered(None, false), "GET /alerts").is_ok());
+        assert!(refuse_stale_read(&Fake(vec![]), "GET /alerts").is_ok());
+        let e = refuse_stale_read(&registered(None, true), "GET /alerts").unwrap_err().to_string();
+        assert!(e.contains("GET /alerts"), "{e}");
     }
 
     #[test]
