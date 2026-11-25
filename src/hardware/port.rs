@@ -647,10 +647,24 @@ fn describe(candidates: &[DetectedPort]) -> String {
 /// enrollment file read `Filter::resolve` does) — callers on an async
 /// runtime should run this via `spawn_blocking`, same as `embarch-core`
 /// already does for every other hardware-touching call.
+///
+/// **A recorded control-port identity decides alone** (EMB-472, decision 62):
+/// [`select_control_port`] runs and the SEGGER-VID rules below never do. With
+/// none recorded, nothing here differs from before.
 #[cfg(feature = "hardware")]
 pub fn detect() -> Result<DevBenchPort> {
-    let filter = Filter::resolve()?;
     let ports = serialport::available_ports().context("failed to enumerate serial ports")?;
+    match enrollment::dev_bench_control_port() {
+        Ok(Some(id)) => return select_control_port(&ports, &id),
+        Ok(None) => {}
+        Err(e) => {
+            tracing::warn!(
+                "failed to read enrollment while looking for dev-bench's control port, \
+                 continuing with VID detection: {e:?}"
+            );
+        }
+    }
+    let filter = Filter::resolve()?;
     select(&ports, &filter).map_err(|e| match e.downcast::<NotFound>() {
         // The one thing this live wrapper adds over `select`'s own pure
         // result: `likely_wsl2`, a real-machine read `select` deliberately
@@ -662,6 +676,38 @@ pub fn detect() -> Result<DevBenchPort> {
         }
         Err(e) => e,
     })
+}
+
+/// What a port found by the dev-bench's recorded control-port identity reports
+/// in `detected_by`: no VID rule selected it, the recorded identity did.
+pub const CONTROL_PORT_IDENTITY: &str = "control-port-identity";
+
+/// The one port among `ports` matching the dev-bench's recorded control-port
+/// `id`, however its vendor ID reads (a native USB device is not a SEGGER).
+/// Pure, like [`select`].
+///
+/// **Never guesses between ports.** A composite device carrying a control, a
+/// samples and an SMP port shares one VID:PID:serial across all three, so an
+/// identity without an `interface` that matches more than one is refused as
+/// [`AmbiguousUsbPort`](super::bootload::AmbiguousUsbPort) rather than
+/// resolved to the first, and one with an `interface` matches that port only.
+/// Not enumerated is an error too, not a fall back to VID detection: a
+/// recorded identity is a declared fact, and the SEGGER path could pick a
+/// different device.
+#[cfg(feature = "hardware")]
+pub fn select_control_port(ports: &[SerialPortInfo], id: &super::bootload::UsbPortId) -> Result<DetectedPort> {
+    let candidates = enumerate_in(ports);
+    match super::bootload::find_in(&candidates, id)? {
+        Some(mut port) => {
+            port.detected_by = CONTROL_PORT_IDENTITY.to_string();
+            Ok(port)
+        }
+        None => bail!(
+            "no serial port matches the dev-bench's recorded control port {id} ({} USB serial port(s) visible); \
+             is it plugged in, or does the recorded identity need clearing?",
+            candidates.len()
+        ),
+    }
 }
 
 /// What [`enumerate`] reports as a port's provenance: nothing narrowed it,
@@ -1180,5 +1226,62 @@ mod tests {
             "the VID gate ran and did exclude every other vendor, so it is credited even though \
              the declared serial and interface did the narrowing among these three"
         );
+    }
+
+    /// A native-USB composite device: one VID:PID:serial, three CDC ACM ports
+    /// at interfaces 0, 2 and 4 (control, samples, SMP) -- plus a SEGGER
+    /// J-Link on the same bench, which VID detection would otherwise choose.
+    fn composite(serial: &str) -> Vec<SerialPortInfo> {
+        let port = |name: &str, interface: u8| SerialPortInfo {
+            port_name: name.to_string(),
+            port_type: SerialPortType::UsbPort(serialport::UsbPortInfo {
+                vid: 0x2fe3,
+                pid: 0x0100,
+                serial_number: Some(serial.to_string()),
+                manufacturer: None,
+                product: None,
+                interface: Some(interface),
+            }),
+        };
+        vec![
+            usb("COM3", SEGGER_VID, Some("JLink CDC UART Port"), Some("001057729826"), Some(0)),
+            port("COM10", 0),
+            port("COM11", 2),
+            port("COM12", 4),
+        ]
+    }
+
+    fn control_id(interface: Option<u8>) -> super::super::bootload::UsbPortId {
+        super::super::bootload::UsbPortId { vid: 0x2fe3, pid: 0x0100, serial: Some("ABCD".into()), interface }
+    }
+
+    #[test]
+    fn a_recorded_control_port_is_found_by_its_identity_not_by_vid() {
+        let found = select_control_port(&composite("ABCD"), &control_id(Some(0))).unwrap();
+        assert_eq!(found.port_name, "COM10");
+        assert_eq!(found.detected_by, CONTROL_PORT_IDENTITY);
+    }
+
+    #[test]
+    fn the_samples_and_smp_ports_of_the_same_serial_are_never_taken() {
+        let ports = composite("ABCD");
+        // The interface says which; the others of the same serial stay out.
+        assert_eq!(select_control_port(&ports, &control_id(Some(2))).unwrap().port_name, "COM11");
+        assert_eq!(select_control_port(&ports, &control_id(Some(4))).unwrap().port_name, "COM12");
+        // No interface recorded: three ports match, and none is guessed.
+        let err = select_control_port(&ports, &control_id(None)).unwrap_err();
+        assert!(err.to_string().contains("COM10, COM11, COM12"), "{err}");
+        // Another bench's serial matches nothing, and does not fall to the J-Link.
+        let err = select_control_port(&ports, &control_id(Some(0))).and_then(|_| select_control_port(&composite("WXYZ"), &control_id(Some(0))));
+        assert!(err.unwrap_err().to_string().contains("no serial port matches"));
+    }
+
+    #[test]
+    fn without_a_recorded_control_port_vid_detection_is_unchanged() {
+        // select() is what detect() runs when nothing is recorded: the J-Link
+        // is chosen and the native-USB ports, not SEGGER's, are not candidates.
+        let found = select(&composite("ABCD"), &default_filter()).unwrap();
+        assert_eq!(found.port_name, "COM3");
+        assert_eq!(found.detected_by, "segger-vid-match");
     }
 }

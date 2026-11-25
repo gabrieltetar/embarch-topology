@@ -41,7 +41,7 @@ pub use hardware_id::{compare_self_reported, SelfReportedIdentity};
 pub use paths::{alert_log_path, data_dir, enrollment_path, set_data_dir};
 pub use port::{
     DetectedPort, DevBenchPort, ExcludingRule as DevBenchNotFoundRule,
-    NotFound as DevBenchNotFound, DECLARED_SERIAL, DEV_BENCH_ROLE, ENUMERATED,
+    NotFound as DevBenchNotFound, CONTROL_PORT_IDENTITY, DECLARED_SERIAL, DEV_BENCH_ROLE, ENUMERATED,
 };
 #[cfg(feature = "hardware")]
 pub use port::AmbiguousDeclaredSerial;
@@ -111,6 +111,28 @@ pub fn clear_dev_bench_link_port_serial() -> anyhow::Result<()> {
 #[cfg(feature = "hardware")]
 pub fn clear_dev_bench_link_port_interface() -> anyhow::Result<()> {
     enrollment::clear_link_port_interface(DEV_BENCH_ROLE)
+}
+
+/// Records the USB identity of the dev-bench's control port, for a bench whose
+/// control link is a CDC ACM port rather than a SEGGER J-Link UART (decision
+/// 62). [`resolve_dev_bench_port`] then finds the bench by it. The role must
+/// already be enrolled.
+#[cfg(feature = "hardware")]
+pub fn set_dev_bench_control_port(id: UsbPortId) -> anyhow::Result<()> {
+    enrollment::set_dev_bench_control_port(id)
+}
+
+/// The recorded control-port identity, if any.
+#[cfg(feature = "hardware")]
+pub fn dev_bench_control_port() -> anyhow::Result<Option<UsbPortId>> {
+    enrollment::dev_bench_control_port()
+}
+
+/// Forgets the recorded control port, reverting detection to the SEGGER VID.
+/// `Ok(false)` when none was recorded.
+#[cfg(feature = "hardware")]
+pub fn clear_dev_bench_control_port() -> anyhow::Result<bool> {
+    enrollment::clear_dev_bench_control_port()
 }
 
 /// Every declared DUT signal link (decision 18).

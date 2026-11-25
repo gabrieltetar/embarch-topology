@@ -167,6 +167,15 @@ pub struct Store {
     /// `bootload_ports`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub instruments: Vec<super::instrument::Instrument>,
+    /// The USB identity of the dev-bench's control port (EMB-472), for a
+    /// bench whose control link is not a SEGGER J-Link UART. Absent means
+    /// detection by [`super::port::SEGGER_VID`] as before, and a store that
+    /// never recorded one is rewritten byte-for-byte as it was. **Its own key,
+    /// not a field on [`EnrolledBoard`]**, for the reason `bootload_ports`
+    /// gives: every struct literal of that type across three other repos
+    /// would have had to change for a fact none of them read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dev_bench_control_port: Option<super::bootload::UsbPortId>,
 }
 
 #[cfg(feature = "hardware")]
@@ -369,6 +378,12 @@ fn upsert_at(path: &Path, board: EnrolledBoard) -> Result<Upserted> {
     });
     let vacated_kept = kept.is_some();
 
+    // A control port describes the USB link of the board that held the role
+    // (decision 62), so a role moving to different silicon does not inherit it,
+    // for the reason `link_port_serial` is not inherited either.
+    if displaced.is_some() && board.role == super::port::DEV_BENCH_ROLE {
+        store.dev_bench_control_port = None;
+    }
     store.boards.retain(|b| !same_probe(b) && !(holds_role && b.role == board.role));
     store.boards.extend(kept);
     store.boards.push(board);
@@ -465,6 +480,9 @@ fn remove_by_role_at(path: &Path, role: &str) -> Result<Option<EnrolledBoard>> {
         return Ok(None);
     }
     store.boards.retain(|b| b.role != role);
+    if role == super::port::DEV_BENCH_ROLE {
+        store.dev_bench_control_port = None;
+    }
     save_at(path, &store)?;
     Ok(removed)
 }
@@ -532,6 +550,45 @@ pub fn clear_link_port_serial(role: &str) -> Result<()> {
 #[cfg(feature = "hardware")]
 pub fn clear_link_port_interface(role: &str) -> Result<()> {
     amend(role, |board| board.link_port_interface = None)
+}
+
+/// The dev-bench's recorded control-port USB identity, if one was recorded.
+/// `None` means detection stays the SEGGER-VID path.
+#[cfg(feature = "hardware")]
+pub fn dev_bench_control_port() -> Result<Option<super::bootload::UsbPortId>> {
+    Ok(load_at(&paths::enrollment_path()?)?.dev_bench_control_port)
+}
+
+/// Records the dev-bench's control-port USB identity. The role must already
+/// be enrolled, like [`set_link_port_serial`]: a control port is a fact about
+/// a bench that exists.
+#[cfg(feature = "hardware")]
+pub fn set_dev_bench_control_port(id: super::bootload::UsbPortId) -> Result<()> {
+    set_dev_bench_control_port_at(&paths::enrollment_path()?, id)
+}
+
+#[cfg(feature = "hardware")]
+fn set_dev_bench_control_port_at(path: &Path, id: super::bootload::UsbPortId) -> Result<()> {
+    let mut store = load_at(path)?;
+    let role = super::port::DEV_BENCH_ROLE;
+    if !store.boards.iter().any(|b| b.role == role) {
+        anyhow::bail!("no board enrolled as role '{role}' yet; enroll it first");
+    }
+    store.dev_bench_control_port = Some(id);
+    save_at(path, &store)
+}
+
+/// Forgets the recorded control port, reverting detection to the SEGGER VID.
+/// `Ok(false)` when none was recorded.
+#[cfg(feature = "hardware")]
+pub fn clear_dev_bench_control_port() -> Result<bool> {
+    let path = paths::enrollment_path()?;
+    let mut store = load_at(&path)?;
+    if store.dev_bench_control_port.take().is_none() {
+        return Ok(false);
+    }
+    save_at(&path, &store)?;
+    Ok(true)
 }
 
 /// The shared body of the two `set_link_port_*` functions above.
@@ -1131,5 +1188,44 @@ confirmed_at_utc_ms = 1755000000000
         assert_eq!(store.boards[0].probe_serial.as_deref(), Some("000852006107"));
         assert_eq!(store.boards[0].hardware_id.as_deref(), Some("deadbeefcafef00d"));
         assert_eq!(store.boards[0].confirmed_at_utc_ms, Some(1_755_000_000_000));
+    }
+
+    /// EMB-472: a store written before `dev_bench_control_port` existed loads
+    /// with none, and a store that never records one is written without the key.
+    #[test]
+    fn a_store_without_a_control_port_loads_and_stays_without_the_key() {
+        let old = "[[boards]]\nrole = \"dev-bench\"\nname = \"\"\nchip = \"nRF54L15\"\nprobe_serial = \"001057729826\"\n";
+        let store: Store = toml::from_str(old).unwrap();
+        assert_eq!(store.dev_bench_control_port, None);
+        assert!(!toml::to_string_pretty(&store).unwrap().contains("dev_bench_control_port"));
+    }
+
+    #[test]
+    fn a_control_port_round_trips_and_needs_an_enrolled_dev_bench() {
+        use super::super::bootload::UsbPortId;
+        let dir = temp_path("control-port-dir");
+        let path = dir.join("enrollment.toml");
+        let _ = std::fs::remove_dir_all(&dir);
+        let id = UsbPortId { vid: 0x2fe3, pid: 0x0100, serial: Some("ABCD".into()), interface: Some(0) };
+
+        // No dev-bench enrolled: refused, and nothing written.
+        assert!(set_dev_bench_control_port_at(&path, id.clone()).is_err());
+
+        let mut bench = sample("001057729826");
+        bench.role = "dev-bench".to_string();
+        save_at(&path, &Store { boards: vec![bench.clone()], ..Store::default() }).unwrap();
+        set_dev_bench_control_port_at(&path, id.clone()).unwrap();
+        assert_eq!(load_at(&path).unwrap().dev_bench_control_port, Some(id.clone()));
+
+        // The same bench re-enrolled keeps it; a different probe taking the
+        // role does not inherit it.
+        upsert_at(&path, bench.clone()).unwrap();
+        assert_eq!(load_at(&path).unwrap().dev_bench_control_port, Some(id));
+        let mut other = sample("000852006107");
+        other.role = "dev-bench".to_string();
+        upsert_at(&path, other).unwrap();
+        assert_eq!(load_at(&path).unwrap().dev_bench_control_port, None);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
