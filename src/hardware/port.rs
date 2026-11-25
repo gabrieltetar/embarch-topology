@@ -204,6 +204,9 @@ pub enum ExcludingRule {
     /// original, generic "re-enroll dev-bench" advice, unchanged, because
     /// there's no single declared fact this can point at clearing.
     Other,
+    /// The dev-bench's recorded control-port identity (EMB-472, decision 62)
+    /// matched no enumerated port. The VID rules never ran.
+    ControlPortIdentity,
 }
 
 /// No port matched. Distinct from every other detection failure so callers
@@ -235,6 +238,15 @@ pub struct NotFound {
 
 impl std::fmt::Display for NotFound {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.excluding_rule == ExcludingRule::ControlPortIdentity {
+            return write!(
+                f,
+                "no embarch-dev-bench serial port found ({} serial port(s) visible) — none matches \
+                 the recorded control port; check its USB connection, or clear the recorded control \
+                 port to fall back to VID detection",
+                self.total_ports_seen
+            );
+        }
         if self.total_ports_seen == 0 && self.likely_wsl2 {
             // The split-host possibility leads, rather than trailing a
             // sentence that already sent the reader to the hardware
@@ -280,6 +292,8 @@ impl std::fmt::Display for NotFound {
                  `embarch-topology set-dev-bench-link --clear-interface`, or declare the current \
                  one with `embarch-topology set-dev-bench-link --interface <n>`"
             ),
+            // Handled before the shared prefix above.
+            ExcludingRule::ControlPortIdentity => Ok(()),
             ExcludingRule::Other => write!(
                 f,
                 " — a matching probe/board is attached but enrollment's dev-bench-role fallback \
@@ -691,7 +705,8 @@ pub const CONTROL_PORT_IDENTITY: &str = "control-port-identity";
 /// identity without an `interface` that matches more than one is refused as
 /// [`AmbiguousUsbPort`](super::bootload::AmbiguousUsbPort) rather than
 /// resolved to the first, and one with an `interface` matches that port only.
-/// Not enumerated is an error too, not a fall back to VID detection: a
+/// Not enumerated is [`NotFound`] too (so Core answers `404`, as for an
+/// unplugged J-Link), not a fall back to VID detection: a
 /// recorded identity is a declared fact, and the SEGGER path could pick a
 /// different device.
 #[cfg(feature = "hardware")]
@@ -702,11 +717,15 @@ pub fn select_control_port(ports: &[SerialPortInfo], id: &super::bootload::UsbPo
             port.detected_by = CONTROL_PORT_IDENTITY.to_string();
             Ok(port)
         }
-        None => bail!(
-            "no serial port matches the dev-bench's recorded control port {id} ({} USB serial port(s) visible); \
-             is it plugged in, or does the recorded identity need clearing?",
-            candidates.len()
-        ),
+        None => {
+            tracing::info!("no serial port matches the dev-bench's recorded control port {id}");
+            Err(anyhow::Error::new(NotFound {
+                candidate_vid_ports_seen: 0,
+                total_ports_seen: candidates.len(),
+                excluding_rule: ExcludingRule::ControlPortIdentity,
+                likely_wsl2: false,
+            }))
+        }
     }
 }
 
@@ -1273,7 +1292,10 @@ mod tests {
         assert!(err.to_string().contains("COM10, COM11, COM12"), "{err}");
         // Another bench's serial matches nothing, and does not fall to the J-Link.
         let err = select_control_port(&ports, &control_id(Some(0))).and_then(|_| select_control_port(&composite("WXYZ"), &control_id(Some(0))));
-        assert!(err.unwrap_err().to_string().contains("no serial port matches"));
+        let err = err.unwrap_err();
+        let not_found = err.downcast_ref::<NotFound>().expect("an absent control port is NotFound");
+        assert_eq!(not_found.excluding_rule, ExcludingRule::ControlPortIdentity);
+        assert!(err.to_string().contains("recorded control port"));
     }
 
     #[test]

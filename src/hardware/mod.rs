@@ -44,7 +44,7 @@ pub use port::{
     NotFound as DevBenchNotFound, CONTROL_PORT_IDENTITY, DECLARED_SERIAL, DEV_BENCH_ROLE, ENUMERATED,
 };
 #[cfg(feature = "hardware")]
-pub use port::AmbiguousDeclaredSerial;
+pub use port::{select_control_port, AmbiguousDeclaredSerial};
 pub use signal::{Route, SignalDirection, SignalLink, SignalMismatch, SignalNotDeclared, SignalOrigin};
 #[cfg(feature = "hardware")]
 pub use signal::SignalAmbiguous;
