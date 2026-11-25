@@ -31,7 +31,10 @@ mod validate;
 
 pub use alert::{Alert, UI_HOST, UI_PORT};
 pub use bootload::{AmbiguousUsbPort, BootloadPorts, UsbPortId};
-pub use instrument::{Ack, Instrument, InstrumentExchange, InstrumentProtocol, InstrumentReply};
+pub use instrument::{
+    Ack, Calibration, Instrument, InstrumentExchange, InstrumentProtocol, InstrumentReply, MeasuringRange, Metrology,
+    MetrologyBasis,
+};
 pub use enrollment::{is_canonical_role, EnrolledBoard, CANONICAL_ROLES, DUT_ROLE, NO_ROLE};
 #[cfg(feature = "hardware")]
 pub use enrollment::Upserted;

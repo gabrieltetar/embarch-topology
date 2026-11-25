@@ -139,6 +139,8 @@ mod tests {
             ack_ok: None,
             ack_err: None,
             safe_off: Vec::new(),
+            metrology: Vec::new(),
+            calibration: None,
         })
         .unwrap();
         signal::declare(SignalLink {
