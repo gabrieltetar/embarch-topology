@@ -56,28 +56,15 @@ pub fn set_data_dir(dir: PathBuf) -> Result<()> {
     SETTING.lock().unwrap_or_else(|e| e.into_inner()).set(dir)
 }
 
-#[cfg(windows)]
-fn machine_data_dir() -> Result<PathBuf> {
-    use anyhow::Context;
-    let program_data =
-        std::env::var("ProgramData").context("ProgramData environment variable is not set")?;
-    Ok(PathBuf::from(program_data).join("embarch"))
-}
-
-#[cfg(unix)]
-fn machine_data_dir() -> Result<PathBuf> {
-    Ok(PathBuf::from("/var/lib/embarch"))
-}
-
 /// The folder [`set_data_dir`] set, or by default
-/// `<machine_data_dir>/topology` — created on first write if it doesn't
+/// `<machine data dir>/topology` — created on first write if it doesn't
 /// exist yet. Every path this module hands out is a child of this one.
 /// Reading it ends the window in which [`set_data_dir`] is accepted.
 pub fn data_dir() -> Result<PathBuf> {
     if let Some(dir) = SETTING.lock().unwrap_or_else(|e| e.into_inner()).read() {
         return Ok(dir);
     }
-    Ok(machine_data_dir()?.join("topology"))
+    Ok(crate::local_machine_data_dir()?.join("topology"))
 }
 
 pub fn enrollment_path() -> Result<PathBuf> {
@@ -170,6 +157,6 @@ mod tests {
     fn unset_the_default_is_the_machine_dir_topology() {
         let mut s = Setting::new();
         assert_eq!(s.read(), None);
-        assert!(machine_data_dir().unwrap().join("topology").ends_with("topology"));
+        assert!(crate::local_machine_data_dir().unwrap().join("topology").ends_with("topology"));
     }
 }

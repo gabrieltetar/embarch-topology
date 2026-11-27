@@ -47,3 +47,12 @@ pub mod hardware;
 /// dependencies (`wsl2`'s own doc comment; `embarch-topology` decision 27).
 #[cfg(any(feature = "software", feature = "hardware"))]
 mod wsl2;
+
+/// The machine data directory resolver, the WSL2 Windows-variable and path
+/// helpers, and [`TopologyClass`] (`embarch-topology` decision 52).
+#[cfg(any(feature = "software", feature = "hardware"))]
+mod machine_dir;
+#[cfg(any(feature = "software", feature = "hardware"))]
+pub use machine_dir::{
+    local_machine_data_dir, machine_data_dir, windows_env_var, windows_path_to_wsl, TopologyClass,
+};

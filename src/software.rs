@@ -36,30 +36,7 @@ pub const DEFAULT_CORE_PORT: u16 = 4884;
 /// (`candidates`' own doc comment).
 const PROBE_TIMEOUT: Duration = Duration::from_millis(800);
 
-/// Which *kind* of place Core turned out to be — the only thing worth
-/// persisting after detection. Deliberately not the resolved address: under
-/// WSL2 that's a gateway IP that changes on every WSL restart, which is
-/// exactly the staleness this whole mechanism exists to eliminate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TopologyClass {
-    /// Reachable at loopback.
-    Local,
-    /// Reachable at the WSL2 default gateway, i.e. a Core running natively on
-    /// the Windows host of this WSL2 guest.
-    WslHost,
-    /// A genuinely separate machine, named explicitly by the operator.
-    Remote,
-}
-
-impl TopologyClass {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            TopologyClass::Local => "local",
-            TopologyClass::WslHost => "wsl-host",
-            TopologyClass::Remote => "remote",
-        }
-    }
-}
+pub use crate::machine_dir::TopologyClass;
 
 /// One place worth looking for Core.
 #[derive(Debug, Clone, PartialEq, Eq)]
